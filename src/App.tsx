@@ -1,235 +1,226 @@
-import { useEffect, useReducer, useRef } from 'react'
-import { Button } from '@/components/ui/button'
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
-import { Slider } from '@/components/ui/slider'
-import { createSession, type SessionHandle } from '@/session/hush'
-import { reduce, type Session } from '@/session/state'
+import type { ReactNode } from "react";
+import { Headphones, Pause, ShieldAlert } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Slider } from "@/components/ui/slider";
+import { COPY, latencyCopy, missingLabel, obstacleCopy } from "@/ui/copy";
+import { Spectrum } from "@/ui/Spectrum";
+import { useHushSession } from "@/session/useHushSession";
+import type { Session } from "@/session/state";
 
-const STRENGTH_LABELS = ['off', 'soft', 'medium', 'strong'] as const
-
-export default function App() {
-  const epoch = useRef(createSession())
-  const [session, dispatch] = useReducer(
-    (current: Session, action: Parameters<typeof reduce>[1]) =>
-      reduce(current, action, epoch.current.handle),
-    epoch.current.session,
-  )
-
-  useEffect(() => {
-    const id = window.setInterval(() => dispatch({ type: 'poll' }), 80)
-    return () => {
-      window.clearInterval(id)
-      epoch.current.handle.stop()
-    }
-  }, [])
-
+function Shell({
+  title,
+  body,
+  children,
+}: {
+  title: string;
+  body: string;
+  children: ReactNode;
+}) {
   return (
-    <main className="mx-auto flex min-h-svh max-w-xl flex-col justify-center gap-6 px-4 py-10">
-      <header className="space-y-2">
-        <p className="text-sm font-medium tracking-wide text-muted-foreground uppercase">Hush</p>
-        <h1 className="text-3xl font-semibold tracking-tight">Hear the room. Cut the drone.</h1>
-        <p className="text-muted-foreground text-pretty">
-          Put on headphones. Hush listens through the microphone, learns the steady noise in the
-          room, and plays back what is left — voices, a knock, a kettle click. It does not cancel
-          sound at your eardrum. It is hear-through with the drone carved out.
-        </p>
-      </header>
-
-      <Card>
-        <CardHeader>
-          <CardTitle>{titleFor(session)}</CardTitle>
-          <CardDescription>{copyFor(session)}</CardDescription>
+    <main className="mx-auto flex min-h-svh w-full max-w-3xl flex-col justify-center px-4 py-8">
+      <Card className="border-border/80 shadow-sm">
+        <CardHeader className="gap-3">
+          <p className="text-xs font-medium tracking-wide text-muted-foreground uppercase">Hush</p>
+          <CardTitle className="text-2xl text-pretty md:text-3xl">{title}</CardTitle>
+          <CardDescription className="text-base leading-relaxed text-pretty">{body}</CardDescription>
         </CardHeader>
-        <CardContent className="space-y-5">
-          <Panel session={session} handle={epoch.current.handle} dispatch={dispatch} />
-        </CardContent>
+        <CardContent className="flex flex-col gap-6">{children}</CardContent>
       </Card>
     </main>
-  )
+  );
 }
 
-type Dispatch = (action: Parameters<typeof reduce>[1]) => void
+function StartPanel({ onStart }: { onStart: () => void }) {
+  const copy = COPY.idle;
+  return (
+    <Shell title={copy.title} body={copy.body}>
+      <Button size="lg" className="h-12 min-h-11 w-full text-base md:w-auto" onClick={onStart}>
+        <Headphones />
+        {copy.primary}
+      </Button>
+    </Shell>
+  );
+}
 
-function Panel({
+function RequestingPanel() {
+  const copy = COPY.requesting;
+  return (
+    <Shell title={copy.title} body={copy.body}>
+      <p className="text-sm text-muted-foreground">許可ダイアログが表示されないときは、アドレスバーのマイクアイコンを確認してください。</p>
+    </Shell>
+  );
+}
+
+function ObstaclePanel({
   session,
-  handle,
-  dispatch,
+  onRetry,
 }: {
-  session: Session
-  handle: SessionHandle
-  dispatch: Dispatch
+  session: Extract<Session, { kind: "blocked" }>;
+  onRetry: () => void;
 }) {
-  if (session.kind === 'unsupported') {
-    return <UnsupportedNote />
-  }
-  if (session.kind === 'blocked') {
-    return <BlockedActions dispatch={dispatch} />
-  }
-  if (session.kind === 'idle' || session.kind === 'requesting') {
-    return <IdleActions session={session} dispatch={dispatch} />
-  }
-  return <ActivePanel session={session} handle={handle} dispatch={dispatch} />
-}
-
-function UnsupportedNote() {
+  const copy = obstacleCopy(session.obstacle);
   return (
-    <p className="text-sm">This browser cannot open the microphone. Use Chrome or Edge on a Mac.</p>
-  )
+    <Shell title={copy.title} body={copy.body}>
+      <Button size="lg" className="h-12 min-h-11 w-full md:w-auto" onClick={onRetry}>
+        {copy.primary}
+      </Button>
+    </Shell>
+  );
 }
 
-function BlockedActions({ dispatch }: { dispatch: Dispatch }) {
+function UnsupportedPanel({ session }: { session: Extract<Session, { kind: "unsupported" }> }) {
+  const copy = COPY.unsupported;
   return (
-    <div className="flex flex-wrap gap-2">
-      <Button onClick={() => dispatch({ type: 'start' })}>Try again</Button>
-    </div>
-  )
+    <Shell title={copy.title} body={copy.body}>
+      <ul className="list-disc pl-5 text-sm text-muted-foreground">
+        {session.missing.map((item) => (
+          <li key={item}>{missingLabel(item)}</li>
+        ))}
+      </ul>
+    </Shell>
+  );
 }
 
-function IdleActions({
+function CalibrationPanel({
   session,
-  dispatch,
+  onCancel,
 }: {
-  session: Session
-  handle?: SessionHandle
-  dispatch: Dispatch
+  session: Extract<Session, { kind: "calibrating" }>;
+  onCancel: () => void;
 }) {
+  const copy = COPY.calibrating;
+  const percent = Math.round(Math.min(1, Math.max(0, session.progress)) * 100);
   return (
-    <div className="flex flex-wrap items-center gap-3">
-      <Button onClick={() => dispatch({ type: 'start' })} disabled={session.kind === 'requesting'}>
-        {session.kind === 'requesting' ? 'Waiting for permission…' : 'Start listening'}
+    <Shell title={copy.title} body={copy.body}>
+      <div className="h-2 overflow-hidden rounded-full bg-muted">
+        <div className="h-full bg-primary transition-[width]" style={{ width: `${percent}%` }} />
+      </div>
+      <p className="text-sm text-muted-foreground">{percent}%</p>
+      <Button variant="outline" className="min-h-11" onClick={onCancel}>
+        {copy.primary}
+      </Button>
+    </Shell>
+  );
+}
+
+function HowlBanner({ peakHz, onDismiss }: { peakHz: number; onDismiss: () => void }) {
+  return (
+    <div className="flex flex-col gap-3 rounded-lg border border-destructive/40 bg-destructive/10 p-4">
+      <p className="flex items-center gap-2 font-medium text-destructive">
+        <ShieldAlert className="size-4" />
+        音が戻ってきました
+      </p>
+      <p className="text-sm text-muted-foreground">
+        ピークは約 {Math.round(peakHz)} Hz です。ヘッドホンをつけてから再開してください。
+      </p>
+      <Button className="min-h-11" onClick={onDismiss}>
+        ヘッドホンをつけて再開
       </Button>
     </div>
-  )
+  );
+}
+
+function StrengthControl({
+  strength,
+  onChange,
+}: {
+  strength: number;
+  onChange: (value: number) => void;
+}) {
+  return (
+    <label className="flex flex-col gap-3">
+      <span className="text-sm font-medium">抑える強さ {Math.round(strength * 100)}%</span>
+      <Slider
+        min={0}
+        max={1}
+        step={0.01}
+        value={[strength]}
+        onValueChange={(value) => {
+          const next = Array.isArray(value) ? value[0] : value;
+          if (typeof next === "number") {
+            onChange(next);
+          }
+        }}
+      />
+    </label>
+  );
+}
+
+function MonitorControls({
+  guarded,
+  stopLabel,
+  actions,
+}: {
+  guarded: boolean;
+  stopLabel: string;
+  actions: ReturnType<typeof useHushSession>["actions"];
+}) {
+  return (
+    <div className="flex flex-col gap-3 sm:flex-row">
+      <Button
+        type="button"
+        variant="secondary"
+        className="min-h-11 flex-1"
+        disabled={guarded}
+        onPointerDown={() => actions.holdBypass(true)}
+        onPointerUp={() => actions.holdBypass(false)}
+        onPointerLeave={() => actions.holdBypass(false)}
+        onPointerCancel={() => actions.holdBypass(false)}
+      >
+        押している間は原音
+      </Button>
+      <Button variant="outline" className="min-h-11" disabled={guarded} onClick={actions.recalibrate}>
+        測り直す
+      </Button>
+      <Button variant="outline" className="min-h-11" onClick={() => void actions.stop()}>
+        <Pause />
+        {stopLabel}
+      </Button>
+    </div>
+  );
 }
 
 function ActivePanel({
   session,
-  handle,
-  dispatch,
+  actions,
 }: {
-  session: Session & { kind: 'calibrating' | 'active' }
-  handle: SessionHandle
-  dispatch: Dispatch
+  session: Extract<Session, { kind: "active" }>;
+  actions: ReturnType<typeof useHushSession>["actions"];
 }) {
+  const copy = COPY.active;
+  const guarded = session.monitor.kind === "held-by-guard";
   return (
-    <>
-      <StrengthControl session={session} dispatch={dispatch} />
-      <LiveActions session={session} handle={handle} dispatch={dispatch} />
-      {session.kind === 'calibrating' ? <CalibrationMeter progress={session.progress} /> : null}
-      {session.kind === 'active' && session.guard ? <GuardNote dispatch={dispatch} /> : null}
-    </>
-  )
+    <Shell title={copy.title} body={`${copy.body} ${latencyCopy(session.latencyMs)}`}>
+      {guarded ? <HowlBanner peakHz={session.monitor.peakHz} onDismiss={actions.dismissGuard} /> : null}
+      <Spectrum input={session.meters.inputBands} noise={session.meters.noiseBands} />
+      <StrengthControl strength={session.strength} onChange={actions.setStrength} />
+      <MonitorControls guarded={guarded} stopLabel={copy.primary ?? "停止"} actions={actions} />
+    </Shell>
+  );
 }
 
-function StrengthControl({
-  session,
-  dispatch,
-}: {
-  session: Session & { kind: 'calibrating' | 'active' }
-  dispatch: Dispatch
-}) {
-  return (
-    <div className="space-y-2">
-      <div className="flex items-center justify-between text-sm">
-        <span>Suppression</span>
-        <span className="text-muted-foreground">{labelFor(session.strength)}</span>
-      </div>
-      <Slider
-        max={1}
-        min={0}
-        step={0.01}
-        value={[session.strength]}
-        onValueChange={(value) => dispatch({ type: 'strength', value: value[0] ?? 0 })}
-      />
-    </div>
-  )
-}
+function App() {
+  const { session, actions } = useHushSession();
 
-function LiveActions({
-  session,
-  handle,
-  dispatch,
-}: {
-  session: Session & { kind: 'calibrating' | 'active' }
-  handle: SessionHandle
-  dispatch: Dispatch
-}) {
-  return (
-    <div className="flex flex-wrap gap-2">
-      <Button
-        variant={session.kind === 'active' && session.bypass ? 'default' : 'outline'}
-        onPointerDown={() => handle.holdBypass(true)}
-        onPointerUp={() => handle.holdBypass(false)}
-        onPointerCancel={() => handle.holdBypass(false)}
-      >
-        {session.kind === 'active' && session.bypass ? 'Bypass on' : 'Hold to hear raw'}
-      </Button>
-      <Button variant="outline" onClick={() => dispatch({ type: 'recalibrate' })}>
-        Recalibrate
-      </Button>
-      <Button variant="outline" onClick={() => dispatch({ type: 'stop' })}>
-        Stop
-      </Button>
-    </div>
-  )
-}
-
-function CalibrationMeter({ progress }: { progress: number }) {
-  return (
-    <p className="text-sm text-muted-foreground">
-      Learning the room… {Math.round(progress * 100)}%
-    </p>
-  )
-}
-
-function GuardNote({ dispatch }: { dispatch: Dispatch }) {
-  return (
-    <p className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm">
-      Playback jumped in level. The room may have changed.{' '}
-      <button className="underline" type="button" onClick={() => dispatch({ type: 'dismiss-guard' })}>
-        Dismiss
-      </button>
-    </p>
-  )
-}
-
-function titleFor(session: Session) {
   switch (session.kind) {
-    case 'unsupported':
-      return 'Microphone unavailable'
-    case 'idle':
-      return 'Ready'
-    case 'requesting':
-      return 'Permission needed'
-    case 'blocked':
-      return 'Microphone blocked'
-    case 'calibrating':
-      return 'Learning the room'
-    case 'active':
-      return session.bypass ? 'Bypass' : 'Listening'
+    case "unsupported":
+      return <UnsupportedPanel session={session} />;
+    case "idle":
+      return <StartPanel onStart={() => void actions.start()} />;
+    case "requesting":
+      return <RequestingPanel />;
+    case "blocked":
+      return <ObstaclePanel session={session} onRetry={() => void actions.start()} />;
+    case "calibrating":
+      return <CalibrationPanel session={session} onCancel={() => void actions.stop()} />;
+    case "active":
+      return <ActivePanel session={session} actions={actions} />;
+    default: {
+      const _exhaustive: never = session;
+      return _exhaustive;
+    }
   }
 }
 
-function copyFor(session: Session) {
-  switch (session.kind) {
-    case 'unsupported':
-      return 'getUserMedia is missing. This page cannot open an audio session.'
-    case 'idle':
-      return 'Start, then keep still for a second while Hush measures the steady noise.'
-    case 'requesting':
-      return 'The browser is asking for the microphone. Allow it to continue.'
-    case 'blocked':
-      return 'Permission was denied or the device is in use. Allow the microphone and try again.'
-    case 'calibrating':
-      return 'Hold still. Voices and sudden sounds during this moment become part of the noise floor.'
-    case 'active':
-      return session.bypass
-        ? 'Raw microphone is playing. Release or tap again to return to suppressed playback.'
-        : 'Steady noise is being pulled down. Transient sounds should still come through.'
-  }
-}
-
-function labelFor(strength: number) {
-  const index = Math.min(STRENGTH_LABELS.length - 1, Math.round(strength * (STRENGTH_LABELS.length - 1)))
-  return STRENGTH_LABELS[index]
-}
+export default App;

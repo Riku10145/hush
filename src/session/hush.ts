@@ -1,220 +1,162 @@
-import { createSuppressor, type AdaptiveSuppressor } from '@/dsp/suppressor'
-import type { Session } from '@/session/state'
+import { strength as clampStrength } from "../dsp/suppressor";
+import { classify, missingCapabilities, openAudioHost, type AudioHost } from "../audio/host";
+import type { EngineReport } from "../audio/protocol";
+import {
+  epoch,
+  IDLE,
+  reduce,
+  type MeterSnapshot,
+  type Session,
+} from "./state";
 
-const FFT_SIZE = 512
-const HOP_SIZE = 128
-const CALIBRATION_HOPS = 48
-const AUDIO_CONSTRAINTS: MediaStreamConstraints = {
-  audio: {
-    echoCancellation: false,
-    noiseSuppression: false,
-    autoGainControl: false,
-    channelCount: 1,
-  },
-  video: false,
-}
-
-export type SessionHandle = {
-  start: () => Promise<void>
-  stop: () => void
-  recalibrate: () => void
-  setStrength: (value: number) => void
-  holdBypass: (held: boolean) => void
-  dismissGuard: () => void
-}
-
-export type SessionEpoch = {
-  session: Session
-  handle: SessionHandle
-}
-
-export function createSession(): SessionEpoch {
-  const engine = createEngine()
+function toMeters(report: Extract<EngineReport, { meters: unknown }>): MeterSnapshot {
   return {
-    session: engine.session,
-    handle: {
-      start: engine.start,
-      stop: engine.stop,
-      recalibrate: engine.recalibrate,
-      setStrength: engine.setStrength,
-      holdBypass: engine.holdBypass,
-      dismissGuard: engine.dismissGuard,
-    },
+    inputLevel: report.meters.inputLevel,
+    outputLevel: report.meters.outputLevel,
+    reductionDb: report.meters.reductionDb,
+    inputBands: Float32Array.from(report.meters.inputBands),
+    noiseBands: Float32Array.from(report.meters.noiseBands),
+    guardMargin: report.meters.guardMargin,
+  };
+}
+
+export type HushActions = {
+  start: () => Promise<void>;
+  stop: () => Promise<void>;
+  recalibrate: () => void;
+  setStrength: (value: number) => void;
+  holdBypass: (held: boolean) => void;
+  dismissGuard: () => void;
+};
+
+type Runtime = {
+  session: Session;
+  currentEpoch: number;
+  host: AudioHost | null;
+  starting: boolean;
+  onChange: (session: Session) => void;
+};
+
+function publish(runtime: Runtime, next: Session) {
+  runtime.session = next;
+  runtime.onChange(runtime.session);
+}
+
+function dispatch(runtime: Runtime, event: Parameters<typeof reduce>[1]) {
+  publish(runtime, reduce(runtime.session, event));
+}
+
+function handleReport(runtime: Runtime, report: EngineReport) {
+  const token = epoch(report.epoch);
+  if (report.kind === "calibrating") {
+    dispatch(runtime, {
+      kind: "calibrating",
+      epoch: token,
+      progress: report.progress,
+      meters: toMeters(report),
+    });
+    return;
+  }
+  if (report.kind === "calibrated") {
+    dispatch(runtime, { kind: "calibrated", epoch: token, meters: toMeters(report) });
+    runtime.host?.send({ kind: "set-monitor", open: true });
+    return;
+  }
+  if (report.kind === "metered") {
+    dispatch(runtime, { kind: "metered", epoch: token, meters: toMeters(report) });
+    return;
+  }
+  dispatch(runtime, { kind: "guard-tripped", epoch: token, peakHz: report.peakHz });
+  runtime.host?.send({ kind: "set-monitor", open: false });
+}
+
+async function stop(runtime: Runtime) {
+  const current = runtime.host;
+  runtime.host = null;
+  if (current) {
+    await current.close();
+  }
+  dispatch(runtime, { kind: "stopped" });
+}
+
+async function start(runtime: Runtime) {
+  const busy =
+    runtime.starting ||
+    runtime.session.kind === "calibrating" ||
+    runtime.session.kind === "active" ||
+    runtime.session.kind === "requesting";
+  if (busy) {
+    return;
+  }
+  const missing = missingCapabilities();
+  if (missing.length > 0) {
+    const [first, ...rest] = missing;
+    dispatch(runtime, { kind: "unsupported", missing: [first, ...rest] });
+    return;
+  }
+  runtime.starting = true;
+  runtime.currentEpoch += 1;
+  const token = epoch(runtime.currentEpoch);
+  dispatch(runtime, { kind: "start-requested", epoch: token });
+  try {
+    runtime.host = await openAudioHost({
+      onReport: (report) => handleReport(runtime, report),
+      onLost: (obstacle) => {
+        void stop(runtime);
+        dispatch(runtime, { kind: "host-failed", epoch: token, obstacle });
+      },
+    });
+    dispatch(runtime, { kind: "host-opened", epoch: token, latencyMs: runtime.host.latencyMs });
+    runtime.host.send({ kind: "calibrate", epoch: runtime.currentEpoch });
+    runtime.host.send({ kind: "set-strength", value: 0.6 });
+  } catch (error) {
+    dispatch(runtime, { kind: "host-failed", epoch: token, obstacle: classify(error) });
+    runtime.host = null;
+  } finally {
+    runtime.starting = false;
   }
 }
 
-function createEngine() {
-  const session: Session = {
-    kind: 'idle',
-    strength: 0.7,
+function recalibrate(runtime: Runtime) {
+  if (runtime.session.kind !== "active" || !runtime.host) {
+    return;
   }
+  runtime.currentEpoch += 1;
+  const token = epoch(runtime.currentEpoch);
+  runtime.host.send({ kind: "set-monitor", open: false });
+  runtime.host.send({ kind: "calibrate", epoch: runtime.currentEpoch });
+  dispatch(runtime, { kind: "recalibrate-requested", epoch: token });
+}
 
-  let context: AudioContext | null = null
-  let stream: MediaStream | null = null
-  let source: MediaStreamAudioSourceNode | null = null
-  let worklet: AudioWorkletNode | null = null
-  let suppressor: AdaptiveSuppressor | null = null
-  let hopBuffer = new Float32Array(HOP_SIZE)
-  let hopFill = 0
-  let hopCount = 0
-  let bypassHeld = false
-  let bypassLatched = false
-  let guardDismissed = false
-
-  const start = async () => {
-    if (session.kind === 'requesting' || session.kind === 'calibrating' || session.kind === 'active') {
-      return
-    }
-    if (typeof navigator === 'undefined' || !navigator.mediaDevices?.getUserMedia) {
-      session.kind = 'unsupported'
-      return
-    }
-    session.kind = 'requesting'
-    try {
-      stream = await navigator.mediaDevices.getUserMedia(AUDIO_CONSTRAINTS)
-      context = new AudioContext({ latencyHint: 'interactive' })
-      await context.audioWorklet.addModule('/hush-processor.js')
-      source = context.createMediaStreamSource(stream)
-      worklet = new AudioWorkletNode(context, 'hush-processor', {
-        numberOfInputs: 1,
-        numberOfOutputs: 1,
-        outputChannelCount: [1],
-        processorOptions: { fftSize: FFT_SIZE, hopSize: HOP_SIZE },
-      })
-      suppressor = createSuppressor({
-        fftSize: FFT_SIZE,
-        hopSize: HOP_SIZE,
-        sampleRate: context.sampleRate,
-      })
-      suppressor.setStrength(session.strength)
-      hopFill = 0
-      hopCount = 0
-      bypassHeld = false
-      bypassLatched = false
-      guardDismissed = false
-      worklet.port.onmessage = (event: MessageEvent) => {
-        onWorkletMessage(event.data)
-      }
-      source.connect(worklet)
-      worklet.connect(context.destination)
-      await context.resume()
-      session.kind = 'calibrating'
-      session.progress = 0
-    } catch {
-      stopTracks()
-      session.kind = 'blocked'
-    }
-  }
-
-  const onWorkletMessage = (data: unknown) => {
-    if (!suppressor || !worklet || typeof data !== 'object' || data === null) {
-      return
-    }
-    if (!('type' in data) || data.type !== 'capture' || !('samples' in data)) {
-      return
-    }
-    const samples = data.samples
-    if (!(samples instanceof Float32Array)) {
-      return
-    }
-    feedCapture(samples)
-  }
-
-  const feedCapture = (samples: Float32Array) => {
-    if (!suppressor) {
-      return
-    }
-    for (let i = 0; i < samples.length; i += 1) {
-      hopBuffer[hopFill] = samples[i] ?? 0
-      hopFill += 1
-      if (hopFill < HOP_SIZE) {
-        continue
-      }
-      hopFill = 0
-      hopCount += 1
-      if (session.kind === 'calibrating') {
-        suppressor.observe(hopBuffer)
-        session.progress = Math.min(1, hopCount / CALIBRATION_HOPS)
-        if (hopCount >= CALIBRATION_HOPS) {
-          session.kind = 'active'
-          session.bypass = false
-          session.guard = false
-        }
-        continue
-      }
-      if (session.kind !== 'active') {
-        continue
-      }
-      const result = suppressor.process(hopBuffer)
-      const bypass = bypassHeld || bypassLatched
-      session.bypass = bypass
-      session.guard = result.guard && !guardDismissed
-      worklet?.port.postMessage({
-        type: 'playback',
-        samples: bypass ? hopBuffer : result.output,
-      })
-    }
-  }
-
-  const stop = () => {
-    if (worklet) {
-      worklet.port.onmessage = null
-      worklet.disconnect()
-    }
-    source?.disconnect()
-    void context?.close()
-    stopTracks()
-    context = null
-    source = null
-    worklet = null
-    suppressor = null
-    hopFill = 0
-    hopCount = 0
-    if (session.kind === 'unsupported') {
-      return
-    }
-    session.kind = 'idle'
-    session.strength = session.strength
-  }
-
-  const stopTracks = () => {
-    stream?.getTracks().forEach((track) => track.stop())
-    stream = null
-  }
-
-  const recalibrate = () => {
-    if (session.kind !== 'active' && session.kind !== 'calibrating') {
-      return
-    }
-    suppressor?.resetNoise()
-    hopCount = 0
-    guardDismissed = false
-    session.kind = 'calibrating'
-    session.progress = 0
-  }
-
-  const setStrength = (value: number) => {
-    const next = Math.min(1, Math.max(0, value))
-    session.strength = next
-    suppressor?.setStrength(next)
-  }
-
-  const holdBypass = (held: boolean) => {
-    bypassHeld = held
-    if (held) {
-      bypassLatched = !bypassLatched
-    }
-    if (session.kind === 'active') {
-      session.bypass = bypassHeld || bypassLatched
-    }
-  }
-
-  const dismissGuard = () => {
-    guardDismissed = true
-    if (session.kind === 'active') {
-      session.guard = false
-    }
-  }
-
-  return { session, start, stop, recalibrate, setStrength, holdBypass, dismissGuard }
+export function createHushSession(onChange: (session: Session) => void): HushActions & {
+  getSession: () => Session;
+} {
+  const runtime: Runtime = {
+    session: IDLE,
+    currentEpoch: 0,
+    host: null,
+    starting: false,
+    onChange,
+  };
+  return {
+    getSession() {
+      return runtime.session;
+    },
+    start: () => start(runtime),
+    stop: () => stop(runtime),
+    recalibrate: () => recalibrate(runtime),
+    setStrength(value) {
+      const next = clampStrength(value);
+      runtime.host?.send({ kind: "set-strength", value: next });
+      dispatch(runtime, { kind: "strength-changed", value: next });
+    },
+    holdBypass(held) {
+      runtime.host?.send({ kind: "set-bypass", held });
+      dispatch(runtime, { kind: "bypass-held", held });
+    },
+    dismissGuard() {
+      runtime.host?.send({ kind: "reset-guard" });
+      dispatch(runtime, { kind: "guard-dismissed" });
+    },
+  };
 }

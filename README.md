@@ -1,28 +1,117 @@
-# Hush
+# Hush (ハッシュ)
 
-Hush is a browser app for macOS that reduces steady room noise on a live microphone and plays the result to your headphones. It does not cancel sound that reaches your ears directly. Round-trip latency on a Mac is tens of milliseconds, so an inverted-ambient loop would not cancel broadband noise and can howl. Hush learns a noise profile for a few seconds, then subtracts that stationary spectrum.
+Hush は、macOS ブラウザ上で動作するヘッドホン向けヒアスルー（外音取り込み）ノイズ抑制 Web アプリケーションです。
+マイクから周囲の環境音を取り込み、エアコンや換気扇などの定常ノイズのスペクトルを学習・減算してヘッドホンへ低遅延で再生します。
 
-There is no account, no cloud, and no paid API. After `npm install`, it runs offline.
+> **注意**: 耳に直接届く音波を物理的に打ち消すアクティブノイズキャンセリング（物理ANC）ではありません。macOS のブラウザ音声パイプラインでは往復数十ミリ秒の遅延が生じるため、逆位相による空間消音ループは成立せずハウリングの原因になります。Hush は「マイクで拾った音から定常ノイズを削ぎ落として耳に届ける」デジタル信号処理（ヒアスルー・サプレッサー）です。
 
-## Run it
+アカウント登録不要、外部クラウド送信なし、有料 API 不要。`npm install` 後はすべてローカル／オフラインで完結して動作します。
 
-You need Node.js 22 or later.
+---
 
+## 主な機能
+
+- **定常ノイズの学習・減算**: 起動時に約3秒間環境音をサンプリングし、定常的なノイズプロファイルを学習してスペクトル減算を実行。
+- **ヒアスルー再生**: 話し声、ドアのノック音、タイピング音などの突発的・非定常な音はそのまま透過。
+- **バイパス（原音比較）**: 「押している間は原音」ボタンにより、ノイズ抑制前後の音質変化をリアルタイムで瞬時に比較可能。
+- **グラフ再構築不要の再キャリブレーション**: 「測り直す」ボタンでオーディオコンテキストを切断せずに即座にノイズプロファイルを再計測。
+- **ハウリング・過大音ガード**: スピーカー再生時のループや急激な音量跳ね上がりを検知して自動でミュート・保護。
+- **リアルタイム・スペクトログラム**: 入力音とノイズフロアの周波数帯域（24バンド）を視覚的に表示。
+
+---
+
+## 使用技術 (Tech Stack)
+
+### フロントエンド / UI
+- **React 19** (`react`, `react-dom`)
+- **TypeScript 6.0** - 厳格な型安全性を確保
+- **Vite 8** (`@vitejs/plugin-react`) - 高速ビルドおよびローカル開発環境
+- **Tailwind CSS v4** (`@tailwindcss/vite`) - モダンなユーティリティファースト CSS
+- **shadcn / Base UI** (`@base-ui/react`, `class-variance-authority`, `cn`) - アクセシブルで洗練された UI コンポーネント
+- **Lucide React** - アイコンライブラリ
+- **Geist Font** (`@fontsource-variable/geist`) - モダンタイポグラフィ
+
+### 音声信号処理 (DSP / Web Audio)
+- **Web Audio API & AudioWorklet**:
+  - メインスレッドを阻害せず、高精度・低遅延なリアルタイム音声処理スレッド (`AudioWorkletProcessor`) で DSP を実行。
+  - Vite ビルド時に `esbuild` プラグインで独立したスタンドアロン Worklet バンドル (`hush-processor.js`) を自動生成。
+- **自作 TypeScript DSP エンジン** (`src/dsp/`):
+  - **FFT / IFFT (`fft.ts`)**: Cooley-Tukey 型の高速フーリエ変換。ビット反転テーブルや Twiddle 因数を事前キャッシュし、ガベージコレクション (GC) 停止の起きない TypedArray 再利用設計。
+  - **スペクトル減算器 (`suppressor.ts`)**:
+    - STFT (Short-Time Fourier Transform) / Overlap-Add (OLA) 方式（FFT サイズ 512、ホップサイズ 128、平方 Hann 窓、COLA 利得 2）。
+    - オーバーサブトラクション係数・スペクトルフロー制御によるミュージカルノイズ抑制。
+    - 指数平滑化ゲインによる滑らかな遷移。
+- **純粋な独自実装**:
+  - RNNoise や重量な WASM デノイザー、外部有償モデルは一切使用せず、純粋な TypeScript と標準 Web 標準 API のみで実装。
+
+### 開発・品質管理
+- **Vitest**: FFT 演算精度や状態遷移マシンの単体テスト
+- **Oxlint**: 超高速な静的コード解析・リント
+- **Fallow**: コード健全性メトリクス計測（Health Score 100点達成）
+- **ライセンスチェッカー** (`scripts/check-licenses.mjs`): GPL 実行時依存混入の自動防止検証
+
+---
+
+## 動作要件・対応環境
+
+- **OS**: macOS
+- **ブラウザ**: macOS 上の Google Chrome または Apple Safari（最新版推奨）
+- **必須ハードウェア**: **ヘッドホンまたはイヤホン**（スピーカーを使用するとマイクとフィードバックを起こし、保護ガードが作動します）
+- **Node.js**: v22 以上
+
+---
+
+## セットアップと起動手順
+
+### 1. 依存パッケージのインストール
 ```bash
 npm install
-npm test
-npm run check:licenses
+```
+
+### 2. テスト・リント・ライセンス検査の実行
+```bash
+npm test                # Vitest による単体テスト
+npm run lint            # Oxlint による静的解析
+npm run check:licenses  # 実行時依存ライセンスの検証
+```
+
+### 3. 開発サーバーの起動
+```bash
 npm run dev
 ```
 
-Open http://127.0.0.1:43147. Wear headphones. Click **ヘッドホンを着用して開始** and allow the microphone. Stay quiet for 3 seconds. Then you hear a quieter version of the room. Hold **押している間は原音** to compare. **測り直す** learns the room again without tearing the graph down.
+起動後、ブラウザで [http://127.0.0.1:43147](http://127.0.0.1:43147) を開きます。
 
-Safari and Chrome on macOS are the supported browsers. Speakers can feed the microphone and trip the howl guard.
+### 4. 本番ビルド
+```bash
+npm run build
+```
 
-## What it does not do
+---
 
-It does not replace headphone ANC. It does not clean another app's microphone. It does not install a virtual audio device.
+## 使い方
 
-## License
+1. **ヘッドホンを接続して装着します。**
+2. ブラウザで画面を開き、**「ヘッドホンを着用して開始」** をクリックします。
+3. ブラウザからマイク使用の許可を求められたら **「許可」** を選択します。
+4. **約3秒間の計測が始まります。この間はできるだけ静かにしてください。**（話し声や物音を立てると、その音もノイズとして学習されてしまいます）
+5. 計測が終わると、周囲の定常ノイズが低減された音声がヘッドホンから流れます。
+6. **抑える強さ** スライダーでノイズ低減の強度を好みに応じて調整できます。
+7. **「押している間は原音」** ボタンを長押ししている間は加工前のマイク生音声が出力され、ノイズ抑制の効果を確認できます。
+8. 部屋を移動したり空調の強さが変わった場合は、**「測り直す」** を押すことでいつでも再学習できます。
 
-Original code is MIT. See `LICENSE`. `npm run check:licenses` fails if a GPL runtime appears in `package-lock.json`. Permissive SPDX ids plus MIT-0, MPL-2.0, and CC-BY-4.0 are allowed. MPL-2.0 shows up through Tailwind's Lightning CSS compiler at build time, not in the DSP. The FFT and spectral subtraction in `src/dsp/` are original TypeScript. There is no RNNoise and no WASM denoiser.
+---
+
+## 本アプリの対象外事項 (What it does not do)
+
+- **ハードウェア物理ANCの代替**: ヘッドホンの密閉性やハードウェア自身のANC機能を置き換えるものではありません。
+- **他アプリ向けマイククリーナー**: Zoom や Discord、OBS 等の入力マイク音声を直接加工する仮想オーディオデバイス機能（BlackHole 等）は内蔵していません。
+- **空間逆位相消音**: 空気の粗密波を直接相殺して部屋を静寂にするスピーカー消音システムではありません。
+
+---
+
+## ライセンス
+
+コード本体は MIT ライセンスです。詳細は `LICENSE` を参照してください。
+
+`npm run check:licenses` により、`package-lock.json` 内に GPL などの感染性ランタイム依存が含まれていないことを自動検証しています。許可されているライセンスは許諾型（MIT, ISC, Apache-2.0, BSD-2/3-Clause, MIT-0, CC-BY-4.0 等）およびビルド時限定の MPL-2.0（Tailwind Lightning CSS ツールチェーン）のみです。

@@ -80,267 +80,291 @@ function dbFromRms(value: number): number {
   return 20 * Math.log10(Math.max(value, 1e-9));
 }
 
-export function createSuppressor(config: EngineConfig): Suppressor {
-  const fft = createRealFft(FFT_SIZE);
-  const window = sqrtHannWindow(FFT_SIZE);
-  const framesNeeded = Math.max(
-    8,
-    Math.round((config.sampleRate * config.calibrationSeconds) / HOP_SIZE),
-  );
+function fillBands(sampleRate: number, source: Float32Array, dest: Float32Array) {
+  dest.fill(-90);
+  const nyquist = sampleRate / 2;
+  for (let band = 0; band < BAND_COUNT; band++) {
+    const lo = Math.pow(nyquist, band / BAND_COUNT);
+    const hi = Math.pow(nyquist, (band + 1) / BAND_COUNT);
+    let acc = 0;
+    let count = 0;
+    for (let bin = 1; bin < BIN_COUNT; bin++) {
+      const freq = (bin * sampleRate) / FFT_SIZE;
+      if (freq < lo || freq >= hi) {
+        continue;
+      }
+      acc += source[bin];
+      count += 1;
+    }
+    if (count > 0) {
+      dest[band] = dbFromRms(acc / count);
+    }
+  }
+}
 
-  const hopIn = new Float32Array(HOP_SIZE);
-  let hopFill = 0;
-  const history = new Float32Array(FFT_SIZE);
-  const ola = new Float32Array(FFT_SIZE);
-  const frame = new Float32Array(FFT_SIZE);
-  const re = new Float32Array(FFT_SIZE);
-  const im = new Float32Array(FFT_SIZE);
-  const mag = new Float32Array(BIN_COUNT);
-  const noiseSum = new Float32Array(BIN_COUNT);
-  const noise = new Float32Array(BIN_COUNT);
+type Engine = {
+  config: EngineConfig;
+  fft: ReturnType<typeof createRealFft>;
+  window: Float32Array;
+  framesNeeded: number;
+  hopIn: Float32Array;
+  hopFill: number;
+  history: Float32Array;
+  ola: Float32Array;
+  frame: Float32Array;
+  re: Float32Array;
+  im: Float32Array;
+  mag: Float32Array;
+  noiseSum: Float32Array;
+  noise: Float32Array;
+  prevGain: Float32Array;
+  hopOut: Float32Array;
+  pendingOut: Float32Array;
+  pendingLen: number;
+  lastInputBands: Float32Array;
+  lastNoiseBands: Float32Array;
+  phase: "calibrating" | "suppressing";
+  seeded: number;
+  currentStrength: Strength;
+  bypassMix: number;
+  wantBypass: boolean;
+  monitorOpen: boolean;
+  howlCount: number;
+  lastReport: FrameReport;
+};
+
+function allocate(config: EngineConfig): Engine {
   const prevGain = new Float32Array(BIN_COUNT);
   prevGain.fill(1);
-  const hopOut = new Float32Array(HOP_SIZE);
-  const pendingOut = new Float32Array(HOP_SIZE * 4);
-  let pendingLen = 0;
-  const lastInputBands = new Float32Array(BAND_COUNT);
-  const lastNoiseBands = new Float32Array(BAND_COUNT);
+  const framesNeeded = Math.max(8, Math.round((config.sampleRate * config.calibrationSeconds) / HOP_SIZE));
+  return {
+    config,
+    fft: createRealFft(FFT_SIZE),
+    window: sqrtHannWindow(FFT_SIZE),
+    framesNeeded,
+    hopIn: new Float32Array(HOP_SIZE),
+    hopFill: 0,
+    history: new Float32Array(FFT_SIZE),
+    ola: new Float32Array(FFT_SIZE),
+    frame: new Float32Array(FFT_SIZE),
+    re: new Float32Array(FFT_SIZE),
+    im: new Float32Array(FFT_SIZE),
+    mag: new Float32Array(BIN_COUNT),
+    noiseSum: new Float32Array(BIN_COUNT),
+    noise: new Float32Array(BIN_COUNT),
+    prevGain,
+    hopOut: new Float32Array(HOP_SIZE),
+    pendingOut: new Float32Array(HOP_SIZE * 4),
+    pendingLen: 0,
+    lastInputBands: new Float32Array(BAND_COUNT),
+    lastNoiseBands: new Float32Array(BAND_COUNT),
+    phase: "calibrating",
+    seeded: 0,
+    currentStrength: config.initialStrength,
+    bypassMix: 0,
+    wantBypass: false,
+    monitorOpen: false,
+    howlCount: 0,
+    lastReport: { kind: "calibrating", framesSeeded: 0, framesNeeded, inputLevel: 0 },
+  };
+}
 
-  let phase: "calibrating" | "suppressing" = "calibrating";
-  let seeded = 0;
-  let currentStrength = config.initialStrength;
-  let bypassMix = 0;
-  let wantBypass = false;
-  let monitorOpen = false;
-  let howlCount = 0;
-  let lastReport: FrameReport = {
+function analyzeHop(engine: Engine) {
+  engine.history.copyWithin(0, HOP_SIZE);
+  engine.history.set(engine.hopIn, FFT_SIZE - HOP_SIZE);
+  for (let i = 0; i < FFT_SIZE; i++) {
+    engine.frame[i] = engine.history[i] * engine.window[i];
+  }
+  engine.fft.forward(engine.frame, engine.re, engine.im);
+  for (let bin = 0; bin < BIN_COUNT; bin++) {
+    engine.mag[bin] = Math.hypot(engine.re[bin], engine.im[bin]);
+  }
+  fillBands(engine.config.sampleRate, engine.mag, engine.lastInputBands);
+  engine.bypassMix += ((engine.wantBypass ? 1 : 0) - engine.bypassMix) * BYPASS_SLEW;
+}
+
+function seedNoise(engine: Engine, inputLevel: number): FrameReport {
+  for (let bin = 0; bin < BIN_COUNT; bin++) {
+    engine.noiseSum[bin] += engine.mag[bin];
+  }
+  engine.seeded += 1;
+  engine.hopOut.fill(0);
+  if (engine.seeded >= engine.framesNeeded) {
+    for (let bin = 0; bin < BIN_COUNT; bin++) {
+      engine.noise[bin] = engine.noiseSum[bin] / engine.seeded;
+    }
+    fillBands(engine.config.sampleRate, engine.noise, engine.lastNoiseBands);
+    engine.phase = "suppressing";
+    engine.prevGain.fill(1);
+  }
+  return { kind: "calibrating", framesSeeded: engine.seeded, framesNeeded: engine.framesNeeded, inputLevel };
+}
+
+function applyGains(engine: Engine): number {
+  const oversub = 1 + engine.currentStrength * 2.4;
+  const floor = 0.06 * (1 - 0.75 * engine.currentStrength);
+  const wet = engine.currentStrength * (1 - engine.bypassMix);
+  let gainAcc = 0;
+  for (let bin = 0; bin < BIN_COUNT; bin++) {
+    const noisy = engine.mag[bin];
+    const subtracted = (noisy - oversub * engine.noise[bin]) / Math.max(noisy, EPS);
+    const suppressed = Math.min(1, Math.max(floor, subtracted));
+    const instant = suppressed * wet + (1 - wet);
+    const smoothed = GAIN_SMOOTH * engine.prevGain[bin] + (1 - GAIN_SMOOTH) * instant;
+    engine.prevGain[bin] = smoothed;
+    gainAcc += smoothed;
+    engine.re[bin] *= smoothed;
+    engine.im[bin] *= smoothed;
+  }
+  return gainAcc;
+}
+
+function overlapAdd(engine: Engine) {
+  for (let i = 1; i < FFT_SIZE / 2; i++) {
+    engine.re[FFT_SIZE - i] = engine.re[i];
+    engine.im[FFT_SIZE - i] = -engine.im[i];
+  }
+  engine.im[0] = 0;
+  engine.im[FFT_SIZE / 2] = 0;
+  engine.fft.inverse(engine.re, engine.im, engine.frame);
+  for (let i = 0; i < FFT_SIZE; i++) {
+    engine.ola[i] += (engine.frame[i] * engine.window[i]) / COLA_GAIN;
+  }
+  engine.hopOut.set(engine.ola.subarray(0, HOP_SIZE));
+  engine.ola.copyWithin(0, HOP_SIZE);
+  engine.ola.fill(0, FFT_SIZE - HOP_SIZE);
+  if (!engine.monitorOpen) {
+    engine.hopOut.fill(0);
+  }
+}
+
+function howlVerdict(engine: Engine, inputLevel: number, outputLevel: number): HowlVerdict {
+  let peakBin = 1;
+  let peak = engine.mag[1];
+  let magSum = 0;
+  for (let bin = 1; bin < BIN_COUNT; bin++) {
+    magSum += engine.mag[bin];
+    if (engine.mag[bin] > peak) {
+      peak = engine.mag[bin];
+      peakBin = bin;
+    }
+  }
+  const dominant = peak / Math.max(magSum, EPS);
+  const howling =
+    engine.monitorOpen &&
+    !engine.wantBypass &&
+    inputLevel > 0.02 &&
+    outputLevel > inputLevel * HOWL_RATIO &&
+    dominant > 0.35;
+  engine.howlCount = howling ? engine.howlCount + 1 : Math.max(0, engine.howlCount - 1);
+  if (engine.howlCount >= HOWL_FRAMES) {
+    engine.hopOut.fill(0);
+    return { kind: "trip", peakHz: (peakBin * engine.config.sampleRate) / FFT_SIZE };
+  }
+  return { kind: "clear", margin: 1 - engine.howlCount / HOWL_FRAMES };
+}
+
+function processHop(engine: Engine): FrameReport {
+  analyzeHop(engine);
+  const inputLevel = rms(engine.hopIn);
+  if (engine.phase === "calibrating") {
+    return seedNoise(engine, inputLevel);
+  }
+  const gainAcc = applyGains(engine);
+  overlapAdd(engine);
+  const outputLevel = rms(engine.hopOut);
+  const howl = howlVerdict(engine, inputLevel, outputLevel);
+  return {
+    kind: "suppressing",
+    inputLevel,
+    outputLevel,
+    reductionDb: -dbFromRms(Math.max(gainAcc / BIN_COUNT, 1e-6)),
+    howl,
+  };
+}
+
+function drain(engine: Engine, output: Float32Array) {
+  const take = Math.min(engine.pendingLen, output.length);
+  output.set(engine.pendingOut.subarray(0, take), 0);
+  if (take < output.length) {
+    output.fill(0, take);
+  }
+  engine.pendingOut.copyWithin(0, take);
+  engine.pendingLen -= take;
+}
+
+function ingest(engine: Engine, input: Float32Array, output: Float32Array): FrameReport {
+  let offset = 0;
+  while (offset < input.length) {
+    const take = Math.min(HOP_SIZE - engine.hopFill, input.length - offset);
+    engine.hopIn.set(input.subarray(offset, offset + take), engine.hopFill);
+    engine.hopFill += take;
+    offset += take;
+    if (engine.hopFill === HOP_SIZE) {
+      engine.lastReport = processHop(engine);
+      if (engine.pendingLen + HOP_SIZE > engine.pendingOut.length) {
+        engine.pendingOut.copyWithin(0, HOP_SIZE);
+        engine.pendingLen = Math.max(0, engine.pendingLen - HOP_SIZE);
+      }
+      engine.pendingOut.set(engine.hopOut, engine.pendingLen);
+      engine.pendingLen += HOP_SIZE;
+      engine.hopFill = 0;
+    }
+  }
+  drain(engine, output);
+  return engine.lastReport;
+}
+
+function resetCalibration(engine: Engine) {
+  engine.phase = "calibrating";
+  engine.seeded = 0;
+  engine.noiseSum.fill(0);
+  engine.hopFill = 0;
+  engine.history.fill(0);
+  engine.ola.fill(0);
+  engine.pendingLen = 0;
+  engine.howlCount = 0;
+  engine.lastReport = {
     kind: "calibrating",
     framesSeeded: 0,
-    framesNeeded,
+    framesNeeded: engine.framesNeeded,
     inputLevel: 0,
   };
+}
 
-  function fillBands(source: Float32Array, dest: Float32Array) {
-    dest.fill(-90);
-    const nyquist = config.sampleRate / 2;
-    for (let band = 0; band < BAND_COUNT; band++) {
-      const lo = Math.pow(nyquist, band / BAND_COUNT);
-      const hi = Math.pow(nyquist, (band + 1) / BAND_COUNT);
-      let acc = 0;
-      let count = 0;
-      for (let bin = 1; bin < BIN_COUNT; bin++) {
-        const freq = (bin * config.sampleRate) / FFT_SIZE;
-        if (freq < lo || freq >= hi) {
-          continue;
-        }
-        acc += source[bin];
-        count += 1;
-      }
-      if (count > 0) {
-        dest[band] = dbFromRms(acc / count);
-      }
-    }
-  }
-
-  function mirrorHermitian() {
-    for (let i = 1; i < FFT_SIZE / 2; i++) {
-      re[FFT_SIZE - i] = re[i];
-      im[FFT_SIZE - i] = -im[i];
-    }
-    im[0] = 0;
-    im[FFT_SIZE / 2] = 0;
-  }
-
-  function processHop(): FrameReport {
-    history.copyWithin(0, HOP_SIZE);
-    history.set(hopIn, FFT_SIZE - HOP_SIZE);
-
-    for (let i = 0; i < FFT_SIZE; i++) {
-      frame[i] = history[i] * window[i];
-    }
-    fft.forward(frame, re, im);
-
-    for (let bin = 0; bin < BIN_COUNT; bin++) {
-      mag[bin] = Math.hypot(re[bin], im[bin]);
-    }
-    fillBands(mag, lastInputBands);
-
-    const inputLevel = rms(hopIn);
-    bypassMix += ((wantBypass ? 1 : 0) - bypassMix) * BYPASS_SLEW;
-
-    if (phase === "calibrating") {
-      for (let bin = 0; bin < BIN_COUNT; bin++) {
-        noiseSum[bin] += mag[bin];
-      }
-      seeded += 1;
-      hopOut.fill(0);
-      if (seeded >= framesNeeded) {
-        for (let bin = 0; bin < BIN_COUNT; bin++) {
-          noise[bin] = noiseSum[bin] / seeded;
-        }
-        fillBands(noise, lastNoiseBands);
-        phase = "suppressing";
-        prevGain.fill(1);
-      }
-      return {
-        kind: "calibrating",
-        framesSeeded: seeded,
-        framesNeeded,
-        inputLevel,
-      };
-    }
-
-    const oversub = 1 + currentStrength * 2.4;
-    const floor = 0.06 * (1 - 0.75 * currentStrength);
-    const wet = currentStrength * (1 - bypassMix);
-    let gainAcc = 0;
-
-    for (let bin = 0; bin < BIN_COUNT; bin++) {
-      const noisy = mag[bin];
-      const subtracted = (noisy - oversub * noise[bin]) / Math.max(noisy, EPS);
-      const suppressed = Math.min(1, Math.max(floor, subtracted));
-      const instant = suppressed * wet + (1 - wet);
-      const smoothed = GAIN_SMOOTH * prevGain[bin] + (1 - GAIN_SMOOTH) * instant;
-      prevGain[bin] = smoothed;
-      gainAcc += smoothed;
-      re[bin] *= smoothed;
-      im[bin] *= smoothed;
-    }
-
-    mirrorHermitian();
-    fft.inverse(re, im, frame);
-
-    for (let i = 0; i < FFT_SIZE; i++) {
-      ola[i] += (frame[i] * window[i]) / COLA_GAIN;
-    }
-    hopOut.set(ola.subarray(0, HOP_SIZE));
-    ola.copyWithin(0, HOP_SIZE);
-    ola.fill(0, FFT_SIZE - HOP_SIZE);
-
-    if (!monitorOpen) {
-      hopOut.fill(0);
-    }
-
-    const outputLevel = rms(hopOut);
-    const meanGain = gainAcc / BIN_COUNT;
-    const reductionDb = -dbFromRms(Math.max(meanGain, 1e-6));
-
-    let peakBin = 1;
-    let peak = mag[1];
-    let magSum = 0;
-    for (let bin = 1; bin < BIN_COUNT; bin++) {
-      magSum += mag[bin];
-      if (mag[bin] > peak) {
-        peak = mag[bin];
-        peakBin = bin;
-      }
-    }
-    const dominant = peak / Math.max(magSum, EPS);
-    const howling =
-      monitorOpen &&
-      !wantBypass &&
-      inputLevel > 0.02 &&
-      outputLevel > inputLevel * HOWL_RATIO &&
-      dominant > 0.35;
-
-    if (howling) {
-      howlCount += 1;
-    } else {
-      howlCount = Math.max(0, howlCount - 1);
-    }
-
-    const howl: HowlVerdict =
-      howlCount >= HOWL_FRAMES
-        ? { kind: "trip", peakHz: (peakBin * config.sampleRate) / FFT_SIZE }
-        : { kind: "clear", margin: 1 - howlCount / HOWL_FRAMES };
-
-    if (howl.kind === "trip") {
-      hopOut.fill(0);
-    }
-
-    return {
-      kind: "suppressing",
-      inputLevel,
-      outputLevel,
-      reductionDb,
-      howl,
-    };
-  }
-
-  function drain(output: Float32Array) {
-    const take = Math.min(pendingLen, output.length);
-    output.set(pendingOut.subarray(0, take), 0);
-    if (take < output.length) {
-      output.fill(0, take);
-    }
-    pendingOut.copyWithin(0, take);
-    pendingLen -= take;
-  }
-
+export function createSuppressor(config: EngineConfig): Suppressor {
+  const engine = allocate(config);
   return {
     hopSize: HOP_SIZE,
     latencySamples: FFT_SIZE - HOP_SIZE,
     process(input, output) {
-      let offset = 0;
-      while (offset < input.length) {
-        const room = HOP_SIZE - hopFill;
-        const take = Math.min(room, input.length - offset);
-        hopIn.set(input.subarray(offset, offset + take), hopFill);
-        hopFill += take;
-        offset += take;
-        if (hopFill === HOP_SIZE) {
-          lastReport = processHop();
-          if (pendingLen + HOP_SIZE > pendingOut.length) {
-            pendingOut.copyWithin(0, HOP_SIZE);
-            pendingLen = Math.max(0, pendingLen - HOP_SIZE);
-          }
-          pendingOut.set(hopOut, pendingLen);
-          pendingLen += HOP_SIZE;
-          hopFill = 0;
-        }
-      }
-      drain(output);
-      return lastReport;
+      return ingest(engine, input, output);
     },
     calibrate() {
-      phase = "calibrating";
-      seeded = 0;
-      noiseSum.fill(0);
-      hopFill = 0;
-      history.fill(0);
-      ola.fill(0);
-      pendingLen = 0;
-      howlCount = 0;
-      lastReport = {
-        kind: "calibrating",
-        framesSeeded: 0,
-        framesNeeded,
-        inputLevel: 0,
-      };
+      resetCalibration(engine);
     },
     setStrength(value) {
-      currentStrength = value;
+      engine.currentStrength = value;
     },
     setBypass(held) {
-      wantBypass = held;
+      engine.wantBypass = held;
     },
     setMonitor(open) {
-      monitorOpen = open;
+      engine.monitorOpen = open;
     },
     bands(which, out) {
-      const source = which === "input" ? lastInputBands : lastNoiseBands;
-      const n = Math.min(out.length, source.length);
-      out.set(source.subarray(0, n));
+      const source = which === "input" ? engine.lastInputBands : engine.lastNoiseBands;
+      out.set(source.subarray(0, Math.min(out.length, source.length)));
     },
     profile() {
-      if (phase !== "suppressing") {
+      if (engine.phase !== "suppressing") {
         return null;
       }
       let acc = 0;
       for (let bin = 0; bin < BIN_COUNT; bin++) {
-        acc += noise[bin] * noise[bin];
+        acc += engine.noise[bin] * engine.noise[bin];
       }
-      return { floorRms: Math.sqrt(acc / BIN_COUNT), frames: seeded };
+      return { floorRms: Math.sqrt(acc / BIN_COUNT), frames: engine.seeded };
     },
   };
 }
@@ -372,12 +396,7 @@ export function mix(a: Float32Array, b: Float32Array): Float32Array {
   return out;
 }
 
-export function bandEnergy(
-  samples: Float32Array,
-  sampleRate: number,
-  lowHz: number,
-  highHz: number,
-): number {
+export function bandEnergy(samples: Float32Array, sampleRate: number, lowHz: number, highHz: number): number {
   const size = 2048;
   const fft = createRealFft(size);
   const re = new Float32Array(size);

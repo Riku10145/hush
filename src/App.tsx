@@ -104,6 +104,83 @@ function CalibrationPanel({
   );
 }
 
+function HowlBanner({ peakHz, onDismiss }: { peakHz: number; onDismiss: () => void }) {
+  return (
+    <div className="flex flex-col gap-3 rounded-lg border border-destructive/40 bg-destructive/10 p-4">
+      <p className="flex items-center gap-2 font-medium text-destructive">
+        <ShieldAlert className="size-4" />
+        音が戻ってきました
+      </p>
+      <p className="text-sm text-muted-foreground">
+        ピークは約 {Math.round(peakHz)} Hz です。ヘッドホンをつけてから再開してください。
+      </p>
+      <Button className="min-h-11" onClick={onDismiss}>
+        ヘッドホンをつけて再開
+      </Button>
+    </div>
+  );
+}
+
+function StrengthControl({
+  strength,
+  onChange,
+}: {
+  strength: number;
+  onChange: (value: number) => void;
+}) {
+  return (
+    <label className="flex flex-col gap-3">
+      <span className="text-sm font-medium">抑える強さ {Math.round(strength * 100)}%</span>
+      <Slider
+        min={0}
+        max={1}
+        step={0.01}
+        value={[strength]}
+        onValueChange={(value) => {
+          const next = Array.isArray(value) ? value[0] : value;
+          if (typeof next === "number") {
+            onChange(next);
+          }
+        }}
+      />
+    </label>
+  );
+}
+
+function MonitorControls({
+  guarded,
+  stopLabel,
+  actions,
+}: {
+  guarded: boolean;
+  stopLabel: string;
+  actions: ReturnType<typeof useHushSession>["actions"];
+}) {
+  return (
+    <div className="flex flex-col gap-3 sm:flex-row">
+      <Button
+        type="button"
+        variant="secondary"
+        className="min-h-11 flex-1"
+        disabled={guarded}
+        onPointerDown={() => actions.holdBypass(true)}
+        onPointerUp={() => actions.holdBypass(false)}
+        onPointerLeave={() => actions.holdBypass(false)}
+        onPointerCancel={() => actions.holdBypass(false)}
+      >
+        押している間は原音
+      </Button>
+      <Button variant="outline" className="min-h-11" disabled={guarded} onClick={actions.recalibrate}>
+        測り直す
+      </Button>
+      <Button variant="outline" className="min-h-11" onClick={() => void actions.stop()}>
+        <Pause />
+        {stopLabel}
+      </Button>
+    </div>
+  );
+}
+
 function ActivePanel({
   session,
   actions,
@@ -115,65 +192,15 @@ function ActivePanel({
   const guarded = session.monitor.kind === "held-by-guard";
   return (
     <Shell title={copy.title} body={`${copy.body} ${latencyCopy(session.latencyMs)}`}>
-      {guarded ? (
-        <div className="flex flex-col gap-3 rounded-lg border border-destructive/40 bg-destructive/10 p-4">
-          <p className="flex items-center gap-2 font-medium text-destructive">
-            <ShieldAlert className="size-4" />
-            音が戻ってきました
-          </p>
-          <p className="text-sm text-muted-foreground">
-            ピークは約 {Math.round(session.monitor.peakHz)} Hz です。ヘッドホンをつけてから再開してください。
-          </p>
-          <Button className="min-h-11" onClick={actions.dismissGuard}>
-            ヘッドホンをつけて再開
-          </Button>
-        </div>
-      ) : null}
-
+      {guarded ? <HowlBanner peakHz={session.monitor.peakHz} onDismiss={actions.dismissGuard} /> : null}
       <Spectrum input={session.meters.inputBands} noise={session.meters.noiseBands} />
-
-      <label className="flex flex-col gap-3">
-        <span className="text-sm font-medium">抑える強さ {Math.round(session.strength * 100)}%</span>
-        <Slider
-          min={0}
-          max={1}
-          step={0.01}
-          value={[session.strength]}
-          onValueChange={(value) => {
-            const next = Array.isArray(value) ? value[0] : value;
-            if (typeof next === "number") {
-              actions.setStrength(next);
-            }
-          }}
-        />
-      </label>
-
-      <div className="flex flex-col gap-3 sm:flex-row">
-        <Button
-          type="button"
-          variant="secondary"
-          className="min-h-11 flex-1"
-          disabled={guarded}
-          onPointerDown={() => actions.holdBypass(true)}
-          onPointerUp={() => actions.holdBypass(false)}
-          onPointerLeave={() => actions.holdBypass(false)}
-          onPointerCancel={() => actions.holdBypass(false)}
-        >
-          押している間は原音
-        </Button>
-        <Button variant="outline" className="min-h-11" disabled={guarded} onClick={actions.recalibrate}>
-          測り直す
-        </Button>
-        <Button variant="outline" className="min-h-11" onClick={() => void actions.stop()}>
-          <Pause />
-          {copy.primary}
-        </Button>
-      </div>
+      <StrengthControl strength={session.strength} onChange={actions.setStrength} />
+      <MonitorControls guarded={guarded} stopLabel={copy.primary ?? "停止"} actions={actions} />
     </Shell>
   );
 }
 
-export function App() {
+function App() {
   const { session, actions } = useHushSession();
 
   switch (session.kind) {

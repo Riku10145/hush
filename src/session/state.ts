@@ -85,91 +85,132 @@ function sameEpoch(session: Session, next: SessionEpoch): boolean {
   );
 }
 
+function onStartRequested(session: Session, event: Extract<SessionEvent, { kind: "start-requested" }>): Session {
+  if (session.kind === "requesting" || session.kind === "calibrating" || session.kind === "active") {
+    return session;
+  }
+  return { kind: "requesting", epoch: event.epoch };
+}
+
+function onHostOpened(session: Session, event: Extract<SessionEvent, { kind: "host-opened" }>): Session {
+  if (!sameEpoch(session, event.epoch)) {
+    return session;
+  }
+  return {
+    kind: "calibrating",
+    epoch: event.epoch,
+    strength: session.kind === "active" || session.kind === "calibrating" ? session.strength : 0.6,
+    progress: 0,
+    meters: SILENT_METERS,
+    replacing: session.kind === "active",
+    latencyMs: event.latencyMs,
+  };
+}
+
+function onHostFailed(session: Session, event: Extract<SessionEvent, { kind: "host-failed" }>): Session {
+  if (session.kind === "requesting" && session.epoch !== event.epoch) {
+    return session;
+  }
+  return { kind: "blocked", obstacle: event.obstacle };
+}
+
+function onCalibrating(session: Session, event: Extract<SessionEvent, { kind: "calibrating" }>): Session {
+  if (session.kind !== "calibrating" || session.epoch !== event.epoch) {
+    return session;
+  }
+  return { ...session, progress: event.progress, meters: event.meters };
+}
+
+function onCalibrated(session: Session, event: Extract<SessionEvent, { kind: "calibrated" }>): Session {
+  if (session.kind !== "calibrating" || session.epoch !== event.epoch) {
+    return session;
+  }
+  return {
+    kind: "active",
+    epoch: session.epoch,
+    strength: session.strength,
+    monitor: { kind: "open", bypassHeld: false },
+    meters: event.meters,
+    latencyMs: session.latencyMs,
+  };
+}
+
+function onMetered(session: Session, event: Extract<SessionEvent, { kind: "metered" }>): Session {
+  if (session.kind !== "active" || session.epoch !== event.epoch) {
+    return session;
+  }
+  return { ...session, meters: event.meters };
+}
+
+function onGuardTripped(session: Session, event: Extract<SessionEvent, { kind: "guard-tripped" }>): Session {
+  if (session.kind !== "active" || session.epoch !== event.epoch) {
+    return session;
+  }
+  return { ...session, monitor: { kind: "held-by-guard", peakHz: event.peakHz } };
+}
+
+function onStrengthChanged(session: Session, event: Extract<SessionEvent, { kind: "strength-changed" }>): Session {
+  if (session.kind === "active" || session.kind === "calibrating") {
+    return { ...session, strength: event.value };
+  }
+  return session;
+}
+
+function onBypassHeld(session: Session, event: Extract<SessionEvent, { kind: "bypass-held" }>): Session {
+  if (session.kind !== "active" || session.monitor.kind !== "open") {
+    return session;
+  }
+  return { ...session, monitor: { kind: "open", bypassHeld: event.held } };
+}
+
+function onRecalibrate(session: Session, event: Extract<SessionEvent, { kind: "recalibrate-requested" }>): Session {
+  if (session.kind !== "active") {
+    return session;
+  }
+  return {
+    kind: "calibrating",
+    epoch: event.epoch,
+    strength: session.strength,
+    progress: 0,
+    meters: SILENT_METERS,
+    replacing: true,
+    latencyMs: session.latencyMs,
+  };
+}
+
+function onGuardDismissed(session: Session): Session {
+  if (session.kind !== "active" || session.monitor.kind !== "held-by-guard") {
+    return session;
+  }
+  return { ...session, monitor: { kind: "open", bypassHeld: false } };
+}
+
 export function reduce(session: Session, event: SessionEvent): Session {
   switch (event.kind) {
     case "unsupported":
       return { kind: "unsupported", missing: event.missing };
     case "start-requested":
-      if (session.kind === "requesting" || session.kind === "calibrating" || session.kind === "active") {
-        return session;
-      }
-      return { kind: "requesting", epoch: event.epoch };
+      return onStartRequested(session, event);
     case "host-opened":
-      if (!sameEpoch(session, event.epoch)) {
-        return session;
-      }
-      return {
-        kind: "calibrating",
-        epoch: event.epoch,
-        strength: session.kind === "active" || session.kind === "calibrating" ? session.strength : 0.6,
-        progress: 0,
-        meters: SILENT_METERS,
-        replacing: session.kind === "active",
-        latencyMs: event.latencyMs,
-      };
+      return onHostOpened(session, event);
     case "host-failed":
-      if (session.kind === "requesting" && session.epoch !== event.epoch) {
-        return session;
-      }
-      return { kind: "blocked", obstacle: event.obstacle };
+      return onHostFailed(session, event);
     case "calibrating":
-      if (session.kind !== "calibrating" || session.epoch !== event.epoch) {
-        return session;
-      }
-      return { ...session, progress: event.progress, meters: event.meters };
+      return onCalibrating(session, event);
     case "calibrated":
-      if (session.kind !== "calibrating" || session.epoch !== event.epoch) {
-        return session;
-      }
-      return {
-        kind: "active",
-        epoch: session.epoch,
-        strength: session.strength,
-        monitor: { kind: "open", bypassHeld: false },
-        meters: event.meters,
-        latencyMs: session.latencyMs,
-      };
+      return onCalibrated(session, event);
     case "metered":
-      if (session.kind !== "active" || session.epoch !== event.epoch) {
-        return session;
-      }
-      return { ...session, meters: event.meters };
+      return onMetered(session, event);
     case "guard-tripped":
-      if (session.kind !== "active" || session.epoch !== event.epoch) {
-        return session;
-      }
-      return {
-        ...session,
-        monitor: { kind: "held-by-guard", peakHz: event.peakHz },
-      };
+      return onGuardTripped(session, event);
     case "strength-changed":
-      if (session.kind === "active" || session.kind === "calibrating") {
-        return { ...session, strength: event.value };
-      }
-      return session;
+      return onStrengthChanged(session, event);
     case "bypass-held":
-      if (session.kind !== "active" || session.monitor.kind !== "open") {
-        return session;
-      }
-      return { ...session, monitor: { kind: "open", bypassHeld: event.held } };
+      return onBypassHeld(session, event);
     case "recalibrate-requested":
-      if (session.kind !== "active") {
-        return session;
-      }
-      return {
-        kind: "calibrating",
-        epoch: event.epoch,
-        strength: session.strength,
-        progress: 0,
-        meters: SILENT_METERS,
-        replacing: true,
-        latencyMs: session.latencyMs,
-      };
+      return onRecalibrate(session, event);
     case "guard-dismissed":
-      if (session.kind !== "active" || session.monitor.kind !== "held-by-guard") {
-        return session;
-      }
-      return { ...session, monitor: { kind: "open", bypassHeld: false } };
+      return onGuardDismissed(session);
     case "stopped":
       return IDLE;
     default: {

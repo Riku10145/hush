@@ -22,3 +22,8 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Hillclimb artifacts
+decisions.tsv
+.audit/
+.fallow/

@@ -1,0 +1,9 @@
+{
+  "$schema": "https://unpkg.com/fallow@3.22.0/schema.json",
+  "entry": [
+    "src/main.tsx",
+    "src/audio/processor.ts",
+    "vite.config.ts",
+    "scripts/check-licenses.mjs"
+  ]
+}

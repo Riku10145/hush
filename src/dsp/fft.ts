@@ -1,105 +1,73 @@
-export const FFT_SIZE = 512;
-export const HOP_SIZE = 128;
-export const BIN_COUNT = FFT_SIZE / 2 + 1;
-export const OVERLAP = FFT_SIZE / HOP_SIZE;
-export const COLA_GAIN = 2;
-
-export type FftSize = typeof FFT_SIZE;
-
-export function sqrtHannWindow(size: number): Float32Array {
-  const window = new Float32Array(size);
-  for (let i = 0; i < size; i++) {
-    window[i] = Math.sqrt(0.5 - 0.5 * Math.cos((2 * Math.PI * i) / size));
-  }
-  return window;
+export function fft(buffer: Float32Array) {
+  const n = buffer.length / 2
+  bitReverse(buffer, n)
+  butterfly(buffer, n)
 }
 
-export function createRealFft(size: number): {
-  size: number;
-  forward: (frame: Float32Array, re: Float32Array, im: Float32Array) => void;
-  inverse: (re: Float32Array, im: Float32Array, frame: Float32Array) => void;
-} {
-  const bits = Math.round(Math.log2(size));
-  if (1 << bits !== size) {
-    throw new Error(`FFT size must be a power of two, got ${size}`);
-  }
-
-  const rev = new Uint32Array(size);
-  for (let i = 0; i < size; i++) {
-    let x = i;
-    let y = 0;
-    for (let b = 0; b < bits; b++) {
-      y = (y << 1) | (x & 1);
-      x >>= 1;
+function bitReverse(buffer: Float32Array, n: number) {
+  let j = 0
+  for (let i = 0; i < n; i += 1) {
+    if (i < j) {
+      swapBin(buffer, i, j)
     }
-    rev[i] = y;
-  }
-
-  const twiddleRe = new Float32Array(size / 2);
-  const twiddleIm = new Float32Array(size / 2);
-  for (let i = 0; i < size / 2; i++) {
-    const angle = (-2 * Math.PI * i) / size;
-    twiddleRe[i] = Math.cos(angle);
-    twiddleIm[i] = Math.sin(angle);
-  }
-
-  const bitrevRe = new Float32Array(size);
-  const bitrevIm = new Float32Array(size);
-  const invRe = new Float32Array(size);
-  const invIm = new Float32Array(size);
-
-  function transform(re: Float32Array, im: Float32Array, inverse: boolean) {
-    for (let i = 0; i < size; i++) {
-      bitrevRe[i] = re[rev[i]];
-      bitrevIm[i] = im[rev[i]];
+    let k = n >> 1
+    while (k >= 1 && j >= k) {
+      j -= k
+      k >>= 1
     }
-    re.set(bitrevRe);
-    im.set(bitrevIm);
+    j += k
+  }
+}
 
-    for (let len = 2; len <= size; len <<= 1) {
-      const half = len >> 1;
-      const stride = size / len;
-      for (let start = 0; start < size; start += len) {
-        for (let k = 0; k < half; k++) {
-          const tIndex = k * stride;
-          let wr = twiddleRe[tIndex];
-          let wi = twiddleIm[tIndex];
-          if (inverse) {
-            wi = -wi;
-          }
-          const even = start + k;
-          const odd = even + half;
-          const tr = wr * re[odd] - wi * im[odd];
-          const ti = wr * im[odd] + wi * re[odd];
-          re[odd] = re[even] - tr;
-          im[odd] = im[even] - ti;
-          re[even] += tr;
-          im[even] += ti;
-        }
-      }
-    }
-
-    if (inverse) {
-      const scale = 1 / size;
-      for (let i = 0; i < size; i++) {
-        re[i] *= scale;
-        im[i] *= scale;
-      }
+function butterfly(buffer: Float32Array, n: number) {
+  for (let size = 2; size <= n; size <<= 1) {
+    const half = size >> 1
+    const step = Math.PI / half
+    for (let group = 0; group < n; group += size) {
+      butterflyGroup(buffer, group, half, step)
     }
   }
+}
 
-  return {
-    size,
-    forward(frame, re, im) {
-      re.set(frame);
-      im.fill(0);
-      transform(re, im, false);
-    },
-    inverse(re, im, frame) {
-      invRe.set(re);
-      invIm.set(im);
-      transform(invRe, invIm, true);
-      frame.set(invRe);
-    },
-  };
+function butterflyGroup(buffer: Float32Array, group: number, half: number, step: number) {
+  for (let pair = 0; pair < half; pair += 1) {
+    const angle = -step * pair
+    const wr = Math.cos(angle)
+    const wi = Math.sin(angle)
+    const even = group + pair
+    const odd = even + half
+    const er = buffer[even * 2] ?? 0
+    const ei = buffer[even * 2 + 1] ?? 0
+    const or = buffer[odd * 2] ?? 0
+    const oi = buffer[odd * 2 + 1] ?? 0
+    buffer[even * 2] = er + wr * or - wi * oi
+    buffer[even * 2 + 1] = ei + wr * oi + wi * or
+    buffer[odd * 2] = er - (wr * or - wi * oi)
+    buffer[odd * 2 + 1] = ei - (wr * oi + wi * or)
+  }
+}
+
+function swapBin(buffer: Float32Array, a: number, b: number) {
+  const ar = buffer[a * 2] ?? 0
+  const ai = buffer[a * 2 + 1] ?? 0
+  buffer[a * 2] = buffer[b * 2] ?? 0
+  buffer[a * 2 + 1] = buffer[b * 2 + 1] ?? 0
+  buffer[b * 2] = ar
+  buffer[b * 2 + 1] = ai
+}
+
+export function ifft(buffer: Float32Array) {
+  conjugate(buffer)
+  fft(buffer)
+  conjugate(buffer)
+  const n = buffer.length / 2
+  for (let i = 0; i < buffer.length; i += 1) {
+    buffer[i] = (buffer[i] ?? 0) / n
+  }
+}
+
+function conjugate(buffer: Float32Array) {
+  for (let i = 1; i < buffer.length; i += 2) {
+    buffer[i] = -(buffer[i] ?? 0)
+  }
 }

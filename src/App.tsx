@@ -1,11 +1,12 @@
 import type { ReactNode } from "react";
-import { Headphones, Pause, ShieldAlert } from "lucide-react";
+import { Headphones, Mic, Pause, ShieldAlert } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Slider } from "@/components/ui/slider";
-import { COPY, latencyCopy, missingLabel, obstacleCopy } from "@/ui/copy";
+import { COPY, latencyCopy, liveSessionCopy, missingLabel, obstacleCopy } from "@/ui/copy";
 import { Spectrum } from "@/ui/Spectrum";
 import { useHushSession } from "@/session/useHushSession";
+import type { LoopbackSink } from "@/audio/sinks";
 import type { Session } from "@/session/state";
 
 function Shell({
@@ -31,13 +32,28 @@ function Shell({
   );
 }
 
-function StartPanel({ onStart }: { onStart: () => void }) {
+function StartPanel({
+  onMeeting,
+  onHearThrough,
+}: {
+  onMeeting: () => void;
+  onHearThrough: () => void;
+}) {
   const copy = COPY.idle;
   return (
     <Shell title={copy.title} body={copy.body}>
-      <Button size="lg" className="h-12 min-h-11 w-full text-base md:w-auto" onClick={onStart}>
-        <Headphones />
+      <Button size="lg" className="h-12 min-h-11 w-full text-base md:w-auto" onClick={onMeeting}>
+        <Mic />
         {copy.primary}
+      </Button>
+      <Button
+        size="lg"
+        variant="outline"
+        className="h-12 min-h-11 w-full text-base md:w-auto"
+        onClick={onHearThrough}
+      >
+        <Headphones />
+        {copy.secondary}
       </Button>
     </Shell>
   );
@@ -48,6 +64,35 @@ function RequestingPanel() {
   return (
     <Shell title={copy.title} body={copy.body}>
       <p className="text-sm text-muted-foreground">許可ダイアログが表示されないときは、アドレスバーのマイクアイコンを確認してください。</p>
+    </Shell>
+  );
+}
+
+function ChooseSinkPanel({
+  session,
+  onChoose,
+  onCancel,
+}: {
+  session: Extract<Session, { kind: "choosing-sink" }>;
+  onChoose: (sink: LoopbackSink) => void;
+  onCancel: () => void;
+}) {
+  const copy = COPY["choosing-sink"];
+  return (
+    <Shell title={copy.title} body={copy.body}>
+      {session.sinks.map((sink) => (
+        <Button
+          key={sink.deviceId}
+          size="lg"
+          className="h-12 min-h-11 w-full text-base"
+          onClick={() => onChoose(sink)}
+        >
+          {sink.label}
+        </Button>
+      ))}
+      <Button variant="outline" className="min-h-11" onClick={onCancel}>
+        {copy.primary}
+      </Button>
     </Shell>
   );
 }
@@ -104,7 +149,15 @@ function CalibrationPanel({
   );
 }
 
-function HowlBanner({ peakHz, onDismiss }: { peakHz: number; onDismiss: () => void }) {
+function HowlBanner({
+  peakHz,
+  meeting,
+  onDismiss,
+}: {
+  peakHz: number;
+  meeting: boolean;
+  onDismiss: () => void;
+}) {
   return (
     <div className="flex flex-col gap-3 rounded-lg border border-destructive/40 bg-destructive/10 p-4">
       <p className="flex items-center gap-2 font-medium text-destructive">
@@ -114,6 +167,11 @@ function HowlBanner({ peakHz, onDismiss }: { peakHz: number; onDismiss: () => vo
       <p className="text-sm text-muted-foreground">
         ピークは約 {Math.round(peakHz)} Hz です。ヘッドホンをつけてから再開してください。
       </p>
+      {meeting ? (
+        <p className="text-sm text-muted-foreground">
+          スピーカーに音が出ていると、仮想マイクへ回り込むことがあります。会議アプリのスピーカーはヘッドホンにしてください。
+        </p>
+      ) : null}
       <Button className="min-h-11" onClick={onDismiss}>
         ヘッドホンをつけて再開
       </Button>
@@ -188,11 +246,19 @@ function ActivePanel({
   session: Extract<Session, { kind: "active" }>;
   actions: ReturnType<typeof useHushSession>["actions"];
 }) {
-  const copy = COPY.active;
+  const copy = liveSessionCopy(session.route);
   const guarded = session.monitor.kind === "held-by-guard";
+  const body =
+    session.route.kind === "meeting" ? copy.body : `${copy.body} ${latencyCopy(session.latencyMs)}`;
   return (
-    <Shell title={copy.title} body={`${copy.body} ${latencyCopy(session.latencyMs)}`}>
-      {guarded ? <HowlBanner peakHz={session.monitor.peakHz} onDismiss={actions.dismissGuard} /> : null}
+    <Shell title={copy.title} body={body}>
+      {guarded ? (
+        <HowlBanner
+          peakHz={session.monitor.peakHz}
+          meeting={session.route.kind === "meeting"}
+          onDismiss={actions.dismissGuard}
+        />
+      ) : null}
       <Spectrum input={session.meters.inputBands} noise={session.meters.noiseBands} />
       <StrengthControl strength={session.strength} onChange={actions.setStrength} />
       <MonitorControls guarded={guarded} stopLabel={copy.primary ?? "停止"} actions={actions} />
@@ -207,11 +273,24 @@ function App() {
     case "unsupported":
       return <UnsupportedPanel session={session} />;
     case "idle":
-      return <StartPanel onStart={() => void actions.start()} />;
+      return (
+        <StartPanel
+          onMeeting={() => void actions.start("meeting")}
+          onHearThrough={() => void actions.start("hear-through")}
+        />
+      );
     case "requesting":
       return <RequestingPanel />;
+    case "choosing-sink":
+      return (
+        <ChooseSinkPanel
+          session={session}
+          onChoose={(sink) => void actions.chooseSink(sink)}
+          onCancel={() => void actions.stop()}
+        />
+      );
     case "blocked":
-      return <ObstaclePanel session={session} onRetry={() => void actions.start()} />;
+      return <ObstaclePanel session={session} onRetry={() => void actions.start(session.intent)} />;
     case "calibrating":
       return <CalibrationPanel session={session} onCancel={() => void actions.stop()} />;
     case "active":

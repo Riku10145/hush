@@ -13,6 +13,8 @@ export type MeetingSinkPick =
   | { readonly kind: "one"; readonly sink: LoopbackSink }
   | { readonly kind: "many"; readonly sinks: readonly LoopbackSink[] };
 
+export type RouteIntent = "hear-through" | "meeting";
+
 export type AudioRoute =
   | { readonly kind: "hear-through" }
   | { readonly kind: "meeting"; readonly sink: LoopbackSink };

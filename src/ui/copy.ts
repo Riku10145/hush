@@ -1,9 +1,11 @@
 import type { Obstacle, Session } from "../session/state";
+import type { AudioRoute } from "../audio/sinks";
 
 export type SessionCopy = {
   readonly title: string;
   readonly body: string;
   readonly primary: string | null;
+  readonly secondary?: string;
 };
 
 export const COPY: { readonly [K in Session["kind"]]: SessionCopy } = {
@@ -14,13 +16,19 @@ export const COPY: { readonly [K in Session["kind"]]: SessionCopy } = {
   },
   idle: {
     title: "周囲の定常ノイズを抑えて聞く",
-    body: "ヘッドホンを着用してください。マイクで拾った周囲の音から、エアコンやファンなどの変わらないノイズを取り除いて再生します。耳に直接届く音を打ち消すわけではありません。",
-    primary: "ヘッドホンを着用して開始",
+    body: "会議のマイクにするには、BlackHole などの仮想デバイスを入れたうえで Chrome を使ってください。Zoom や Meet のマイク入力には、Hush が使うその仮想デバイスを選んでください。ヘッドホンは会議アプリのスピーカーのまま使います。",
+    primary: "会議のマイクとして開始",
+    secondary: "ヘッドホンへヒアスルー",
   },
   requesting: {
     title: "マイクの使用許可を待っています",
     body: "ブラウザの確認ダイアログで「許可」を選んでください。",
     primary: null,
+  },
+  "choosing-sink": {
+    title: "仮想マイクを選ぶ",
+    body: "使う仮想デバイスを選んでください。Zoom や Meet のマイク入力にも、同じ名前を指定します。",
+    primary: "中止",
   },
   blocked: {
     title: "開始できませんでした",
@@ -71,7 +79,36 @@ export function obstacleCopy(obstacle: Obstacle): SessionCopy {
         body: obstacle.detail,
         primary: "もう一度試す",
       };
+    case "no-loopback":
+      return {
+        title: "仮想マイクが見つかりません",
+        body: "BlackHole（https://existential.audio/blackhole/）をインストールし、Chrome を再起動してからもう一度試してください。会議の出力先に Multi-Output Device は使わないでください。",
+        primary: "もう一度試す",
+      };
+    case "sink-unsupported":
+      return {
+        title: "このブラウザでは会議マイクにできません",
+        body: "会議マイクには macOS の最新 Chrome が必要です。Safari では出力先を切り替えられません。",
+        primary: "もう一度試す",
+      };
+    case "sink-failed":
+      return {
+        title: "仮想マイクへ出力できませんでした",
+        body: obstacle.detail,
+        primary: "もう一度試す",
+      };
   }
+}
+
+export function liveSessionCopy(route: AudioRoute): SessionCopy {
+  if (route.kind === "meeting") {
+    return {
+      title: COPY.active.title,
+      body: `Zoom / Meet のマイク入力に「${route.sink.label}」を選んでください。ヘッドホンは会議アプリのスピーカーのまま使います。`,
+      primary: COPY.active.primary,
+    };
+  }
+  return COPY.active;
 }
 
 export function latencyCopy(latencyMs: number): string {

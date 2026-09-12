@@ -93,6 +93,49 @@ async function setContextSinkId(context: AudioContext, sinkId: string): Promise<
   }
 }
 
+function attachProcessor(
+  context: AudioContext,
+  stream: MediaStream,
+  options: AudioHostOptions,
+): AudioHost {
+  const source = context.createMediaStreamSource(stream);
+  const node = new AudioWorkletNode(context, "hush-processor", {
+    numberOfInputs: 1,
+    numberOfOutputs: 1,
+    outputChannelCount: [1],
+  });
+  node.port.onmessage = (event: MessageEvent<unknown>) => {
+    if (isEngineReport(event.data)) {
+      options.onReport(event.data);
+    }
+  };
+  node.onprocessorerror = () => {
+    options.onLost({ kind: "engine-failed", detail: "worklet" });
+  };
+  stream.getAudioTracks().forEach((track) => {
+    track.addEventListener("ended", () => {
+      options.onLost({ kind: "no-input-device" });
+    });
+  });
+  source.connect(node);
+  node.connect(context.destination);
+  const ioMs = ((context.baseLatency || 0) + (context.outputLatency || 0)) * 1000;
+  const algoMs = ((FFT_SIZE - HOP_SIZE) / context.sampleRate) * 1000;
+  return {
+    latencyMs: algoMs + ioMs,
+    send(command) {
+      node.port.postMessage(command);
+    },
+    async close() {
+      node.port.onmessage = null;
+      node.disconnect();
+      source.disconnect();
+      stream.getTracks().forEach((track) => track.stop());
+      await context.close();
+    },
+  };
+}
+
 export async function openAudioHost(options: AudioHostOptions): Promise<AudioHost> {
   const stream = options.stream ?? (await openInputStream());
   let context: AudioContext | undefined;
@@ -104,45 +147,7 @@ export async function openAudioHost(options: AudioHostOptions): Promise<AudioHos
     await context.resume();
     const processorUrl = `${import.meta.env.BASE_URL}hush-processor.js`;
     await context.audioWorklet.addModule(processorUrl);
-    const source = context.createMediaStreamSource(stream);
-    const node = new AudioWorkletNode(context, "hush-processor", {
-      numberOfInputs: 1,
-      numberOfOutputs: 1,
-      outputChannelCount: [1],
-    });
-    node.port.onmessage = (event: MessageEvent<unknown>) => {
-      if (isEngineReport(event.data)) {
-        options.onReport(event.data);
-      }
-    };
-    node.onprocessorerror = () => {
-      options.onLost({ kind: "engine-failed", detail: "worklet" });
-    };
-    stream.getAudioTracks().forEach((track) => {
-      track.addEventListener("ended", () => {
-        options.onLost({ kind: "no-input-device" });
-      });
-    });
-    source.connect(node);
-    node.connect(context.destination);
-
-    const ioMs = ((context.baseLatency || 0) + (context.outputLatency || 0)) * 1000;
-    const algoMs = ((FFT_SIZE - HOP_SIZE) / context.sampleRate) * 1000;
-    const opened = context;
-
-    return {
-      latencyMs: algoMs + ioMs,
-      send(command) {
-        node.port.postMessage(command);
-      },
-      async close() {
-        node.port.onmessage = null;
-        node.disconnect();
-        source.disconnect();
-        stream.getTracks().forEach((track) => track.stop());
-        await opened.close();
-      },
-    };
+    return attachProcessor(context, stream, options);
   } catch (error) {
     stream.getTracks().forEach((track) => track.stop());
     if (context) {

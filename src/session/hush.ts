@@ -144,6 +144,22 @@ function isBusy(runtime: Runtime): boolean {
   );
 }
 
+async function startMeeting(runtime: Runtime, token: SessionEpoch) {
+  const stream = await openInputStream();
+  runtime.heldStream = stream;
+  const pick = pickMeetingSink(await listSinkCatalog());
+  if (pick.kind === "none") {
+    dropHeldStream(runtime);
+    dispatch(runtime, { kind: "host-failed", epoch: token, obstacle: { kind: "no-loopback" } });
+    return;
+  }
+  if (pick.kind === "one") {
+    await connectAndCalibrate(runtime, token, { kind: "meeting", sink: pick.sink }, stream);
+    return;
+  }
+  dispatch(runtime, { kind: "sink-choice-needed", epoch: token, sinks: pick.sinks });
+}
+
 async function start(runtime: Runtime, intent: RouteIntent) {
   if (isBusy(runtime)) {
     return;
@@ -170,19 +186,7 @@ async function start(runtime: Runtime, intent: RouteIntent) {
       await connectAndCalibrate(runtime, token, { kind: "hear-through" }, undefined);
       return;
     }
-    const stream = await openInputStream();
-    runtime.heldStream = stream;
-    const pick = pickMeetingSink(await listSinkCatalog());
-    if (pick.kind === "none") {
-      dropHeldStream(runtime);
-      dispatch(runtime, { kind: "host-failed", epoch: token, obstacle: { kind: "no-loopback" } });
-      return;
-    }
-    if (pick.kind === "one") {
-      await connectAndCalibrate(runtime, token, { kind: "meeting", sink: pick.sink }, stream);
-      return;
-    }
-    dispatch(runtime, { kind: "sink-choice-needed", epoch: token, sinks: pick.sinks });
+    await startMeeting(runtime, token);
   } catch (error) {
     await abandonHost(runtime);
     dispatch(runtime, { kind: "host-failed", epoch: token, obstacle: classify(error) });

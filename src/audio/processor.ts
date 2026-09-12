@@ -71,7 +71,7 @@ class HushProcessor extends AudioWorkletProcessor {
     if (report.kind === "calibrating") {
       this.wasCalibrating = true;
       if (this.hops % 8 === 0) {
-      const meters = this.meters(1);
+        const meters = this.meters(1);
         meters.inputLevel = report.inputLevel;
         const payload: EngineReport = {
           kind: "calibrating",

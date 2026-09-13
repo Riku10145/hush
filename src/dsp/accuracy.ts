@@ -8,12 +8,12 @@ import {
   type Suppressor,
 } from "./suppressor";
 
-export const ACCURACY_RATE = 48_000;
-export const ACCURACY_STRENGTH = 0.6;
-export const ACCURACY_CAL_SECONDS = 0.5;
-export const ACCURACY_MIX_SECONDS = 1.2;
+const ACCURACY_RATE = 48_000;
+const ACCURACY_STRENGTH = 0.6;
+const ACCURACY_CAL_SECONDS = 0.5;
+const ACCURACY_MIX_SECONDS = 1.2;
 
-export type SceneScore = {
+type SceneScore = {
   readonly name: string;
   readonly noiseResid: number;
   readonly signalKeep: number;
@@ -21,7 +21,7 @@ export type SceneScore = {
   readonly siSdr: number;
 };
 
-export type AccuracyReport = {
+type AccuracyReport = {
   readonly reconstructionRms: number;
   readonly sepDb: number;
   readonly siSdr: number;

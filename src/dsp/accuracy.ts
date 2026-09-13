@@ -12,6 +12,8 @@ const ACCURACY_RATE = 48_000;
 const ACCURACY_STRENGTH = 0.6;
 const ACCURACY_CAL_SECONDS = 0.5;
 const ACCURACY_MIX_SECONDS = 1.2;
+const SETTLE_SECONDS = 0.15;
+const RECONSTRUCT_SKIP_SECONDS = 0.1;
 
 type SceneScore = {
   readonly name: string;
@@ -148,8 +150,8 @@ function alignedTail(output: Float32Array, source: Float32Array, delay: number):
   est: Float32Array;
   ref: Float32Array;
 } {
-  const start = delay + ACCURACY_RATE * 0.15;
-  const end = Math.min(output.length, source.length + delay) - 128;
+  const start = delay + Math.round(ACCURACY_RATE * SETTLE_SECONDS);
+  const end = Math.min(output.length, source.length + delay) - HOP_SIZE;
   const n = Math.max(0, end - start);
   const est = new Float32Array(n);
   const ref = new Float32Array(n);
@@ -306,9 +308,10 @@ function reconstructionRms(): number {
   }
   const output = processAll(engine, input);
   const delay = FFT_SIZE - HOP_SIZE;
+  const skip = Math.round(ACCURACY_RATE * RECONSTRUCT_SKIP_SECONDS);
   let err = 0;
   let count = 0;
-  for (let i = delay + 4800; i < input.length - 128; i++) {
+  for (let i = delay + skip; i < input.length - HOP_SIZE; i++) {
     const d = output[i] - input[i - delay];
     err += d * d;
     count += 1;

@@ -67,6 +67,11 @@ const GAIN_SMOOTH = 0.85;
 const BYPASS_SLEW = 0.12;
 const HOWL_FRAMES = 14;
 const HOWL_RATIO = 6;
+const UNITY_RATIO = 2.4;
+const UNITY_MIN_RMS = 0.02;
+const UNITY_HOPS = 5;
+const SNR_DRY_FLOOR = 1;
+const SNR_DRY_SPAN = 6;
 
 function rms(block: Float32Array): number {
   let sum = 0;
@@ -132,7 +137,7 @@ type Engine = {
   howlCount: number;
   lastReport: FrameReport;
   hopRmsEma: number;
-  onsetHold: number;
+  unityHops: number;
 };
 
 function allocate(config: EngineConfig): Engine {
@@ -169,7 +174,7 @@ function allocate(config: EngineConfig): Engine {
     howlCount: 0,
     lastReport: { kind: "calibrating", framesSeeded: 0, framesNeeded, inputLevel: 0 },
     hopRmsEma: 0,
-    onsetHold: 0,
+    unityHops: 0,
   };
 }
 
@@ -187,10 +192,10 @@ function analyzeHop(engine: Engine) {
   engine.bypassMix += ((engine.wantBypass ? 1 : 0) - engine.bypassMix) * BYPASS_SLEW;
   const hopRms = rms(engine.hopIn);
   const floor = Math.max(engine.hopRmsEma, 1e-4);
-  if (engine.phase === "suppressing" && hopRms > floor * 2.4 && hopRms > 0.02) {
-    engine.onsetHold = 5;
-  } else if (engine.onsetHold > 0) {
-    engine.onsetHold -= 1;
+  if (engine.phase === "suppressing" && hopRms > floor * UNITY_RATIO && hopRms > UNITY_MIN_RMS) {
+    engine.unityHops = UNITY_HOPS;
+  } else if (engine.unityHops > 0) {
+    engine.unityHops -= 1;
   }
   engine.hopRmsEma = engine.hopRmsEma * 0.96 + hopRms * 0.04;
 }
@@ -212,16 +217,16 @@ function seedNoise(engine: Engine, inputLevel: number): FrameReport {
   return { kind: "calibrating", framesSeeded: engine.seeded, framesNeeded: engine.framesNeeded, inputLevel };
 }
 
-function snrMask(noisy: number, noise: number): number {
-  return Math.min(1, Math.max(0, (noisy / Math.max(noise, EPS) - 1) / 6));
+function dryFromSnr(noisy: number, noise: number): number {
+  return Math.min(1, Math.max(0, (noisy / Math.max(noise, EPS) - SNR_DRY_FLOOR) / SNR_DRY_SPAN));
 }
 
-function instantGain(suppressed: number, wet: number, mask: number): number {
+function mixGain(suppressed: number, wet: number, dry: number): number {
   const blended = suppressed * wet + (1 - wet);
   if (wet <= 0) {
     return blended;
   }
-  return suppressed * (1 - mask) + blended * mask;
+  return suppressed * (1 - dry) + blended * dry;
 }
 
 function applyGains(engine: Engine): number {
@@ -234,9 +239,9 @@ function applyGains(engine: Engine): number {
     const subtracted = (noisy - oversub * engine.noise[bin]) / Math.max(noisy, EPS);
     const suppressed = Math.min(1, Math.max(floor, subtracted));
     const instant =
-      engine.onsetHold > 0 ? 1 : instantGain(suppressed, wet, snrMask(noisy, engine.noise[bin]));
+      engine.unityHops > 0 ? 1 : mixGain(suppressed, wet, dryFromSnr(noisy, engine.noise[bin]));
     const smoothed =
-      engine.onsetHold > 0 ? 1 : GAIN_SMOOTH * engine.prevGain[bin] + (1 - GAIN_SMOOTH) * instant;
+      engine.unityHops > 0 ? 1 : GAIN_SMOOTH * engine.prevGain[bin] + (1 - GAIN_SMOOTH) * instant;
     engine.prevGain[bin] = smoothed;
     gainAcc += smoothed;
     engine.re[bin] *= smoothed;
@@ -357,7 +362,7 @@ function resetCalibration(engine: Engine) {
     inputLevel: 0,
   };
   engine.hopRmsEma = 0;
-  engine.onsetHold = 0;
+  engine.unityHops = 0;
 }
 
 export function createSuppressor(config: EngineConfig): Suppressor {

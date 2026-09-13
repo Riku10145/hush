@@ -11,6 +11,8 @@ describe("accuracy harness", () => {
     expect(on.siSdr).toBe(again.siSdr);
     expect(on.sepDb).toBe(again.sepDb);
     expect(on.siSdr).toBeGreaterThan(off.siSdr + 1);
+    expect(on.siSdr).toBeGreaterThan(1);
+    expect(on.noiseResid).toBeLessThan(0.05);
     expect(on.noiseResid).toBeLessThan(off.noiseResid);
     expect(on.signalKeep).toBeGreaterThan(0.4);
   });

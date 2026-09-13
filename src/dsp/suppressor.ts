@@ -213,7 +213,7 @@ function seedNoise(engine: Engine, inputLevel: number): FrameReport {
 }
 
 function snrMask(noisy: number, noise: number): number {
-  return Math.min(1, Math.max(0, (noisy / Math.max(noise, EPS) - 1) / 4));
+  return Math.min(1, Math.max(0, (noisy / Math.max(noise, EPS) - 1) / 6));
 }
 
 function instantGain(suppressed: number, wet: number, mask: number): number {

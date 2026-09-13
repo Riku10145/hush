@@ -212,6 +212,18 @@ function seedNoise(engine: Engine, inputLevel: number): FrameReport {
   return { kind: "calibrating", framesSeeded: engine.seeded, framesNeeded: engine.framesNeeded, inputLevel };
 }
 
+function snrMask(noisy: number, noise: number): number {
+  return Math.min(1, Math.max(0, (noisy / Math.max(noise, EPS) - 1) / 4));
+}
+
+function instantGain(suppressed: number, wet: number, mask: number): number {
+  const blended = suppressed * wet + (1 - wet);
+  if (wet <= 0) {
+    return blended;
+  }
+  return suppressed * (1 - mask) + blended * mask;
+}
+
 function applyGains(engine: Engine): number {
   const oversub = 1 + engine.currentStrength * 2.4;
   const floor = 0.06 * (1 - 0.75 * engine.currentStrength);
@@ -221,7 +233,8 @@ function applyGains(engine: Engine): number {
     const noisy = engine.mag[bin];
     const subtracted = (noisy - oversub * engine.noise[bin]) / Math.max(noisy, EPS);
     const suppressed = Math.min(1, Math.max(floor, subtracted));
-    const instant = engine.onsetHold > 0 ? 1 : suppressed * wet + (1 - wet);
+    const instant =
+      engine.onsetHold > 0 ? 1 : instantGain(suppressed, wet, snrMask(noisy, engine.noise[bin]));
     const smoothed =
       engine.onsetHold > 0 ? 1 : GAIN_SMOOTH * engine.prevGain[bin] + (1 - GAIN_SMOOTH) * instant;
     engine.prevGain[bin] = smoothed;

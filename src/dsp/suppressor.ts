@@ -226,7 +226,7 @@ function instantGain(suppressed: number, wet: number, mask: number): number {
 
 function applyGains(engine: Engine): number {
   const oversub = 1 + engine.currentStrength * 2.4;
-  const floor = 0.06 * (1 - 0.75 * engine.currentStrength);
+  const floor = 0.03 * (1 - 0.75 * engine.currentStrength);
   const wet = engine.currentStrength * (1 - engine.bypassMix);
   let gainAcc = 0;
   for (let bin = 0; bin < BIN_COUNT; bin++) {

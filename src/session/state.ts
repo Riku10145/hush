@@ -1,6 +1,12 @@
-import type { AudioRoute, LoopbackSink, RouteIntent } from "../audio/sinks";
+import type { LoopbackSink } from "../audio/sinks";
 
 export type SessionEpoch = number & { readonly __brand: "SessionEpoch" };
+
+export type RouteIntent = "hear-through" | "meeting";
+
+export type AudioRoute =
+  | { readonly kind: "hear-through" }
+  | { readonly kind: "meeting"; readonly sink: LoopbackSink };
 
 export function epoch(value: number): SessionEpoch {
   return value as SessionEpoch;
@@ -13,6 +19,7 @@ export type Obstacle =
   | { readonly kind: "context-blocked" }
   | { readonly kind: "engine-failed"; readonly detail: string }
   | { readonly kind: "no-loopback" }
+  | { readonly kind: "loopback-input" }
   | { readonly kind: "sink-unsupported" }
   | { readonly kind: "sink-failed"; readonly detail: string };
 
@@ -75,8 +82,14 @@ export type SessionEvent =
       readonly epoch: SessionEpoch;
       readonly sinks: readonly LoopbackSink[];
     }
+  | { readonly kind: "sink-chosen"; readonly epoch: SessionEpoch }
   | { readonly kind: "host-opened"; readonly epoch: SessionEpoch; readonly latencyMs: number; readonly route: AudioRoute }
-  | { readonly kind: "host-failed"; readonly epoch: SessionEpoch; readonly obstacle: Obstacle }
+  | {
+      readonly kind: "host-failed";
+      readonly epoch: SessionEpoch;
+      readonly obstacle: Obstacle;
+      readonly intent: RouteIntent;
+    }
   | { readonly kind: "calibrating"; readonly epoch: SessionEpoch; readonly progress: number; readonly meters: MeterSnapshot }
   | { readonly kind: "calibrated"; readonly epoch: SessionEpoch; readonly meters: MeterSnapshot }
   | { readonly kind: "metered"; readonly epoch: SessionEpoch; readonly meters: MeterSnapshot }
@@ -97,19 +110,6 @@ function sameEpoch(session: Session, next: SessionEpoch): boolean {
       session.kind === "active") &&
     session.epoch === next
   );
-}
-
-function intentOf(session: Session): RouteIntent {
-  if (session.kind === "requesting" || session.kind === "blocked") {
-    return session.intent;
-  }
-  if (session.kind === "choosing-sink") {
-    return "meeting";
-  }
-  if (session.kind === "calibrating" || session.kind === "active") {
-    return session.route.kind;
-  }
-  return "hear-through";
 }
 
 function onStartRequested(session: Session, event: Extract<SessionEvent, { kind: "start-requested" }>): Session {
@@ -134,6 +134,13 @@ function onSinkChoiceNeeded(
   return { kind: "choosing-sink", epoch: event.epoch, sinks: event.sinks };
 }
 
+function onSinkChosen(session: Session, event: Extract<SessionEvent, { kind: "sink-chosen" }>): Session {
+  if (session.kind !== "choosing-sink" || session.epoch !== event.epoch) {
+    return session;
+  }
+  return { kind: "requesting", epoch: event.epoch, intent: "meeting" };
+}
+
 function onHostOpened(session: Session, event: Extract<SessionEvent, { kind: "host-opened" }>): Session {
   if (!sameEpoch(session, event.epoch)) {
     return session;
@@ -151,13 +158,16 @@ function onHostOpened(session: Session, event: Extract<SessionEvent, { kind: "ho
 }
 
 function onHostFailed(session: Session, event: Extract<SessionEvent, { kind: "host-failed" }>): Session {
+  if (session.kind === "idle" || session.kind === "unsupported") {
+    return session;
+  }
   if (
     (session.kind === "requesting" || session.kind === "choosing-sink") &&
     session.epoch !== event.epoch
   ) {
     return session;
   }
-  return { kind: "blocked", obstacle: event.obstacle, intent: intentOf(session) };
+  return { kind: "blocked", obstacle: event.obstacle, intent: event.intent };
 }
 
 function onCalibrating(session: Session, event: Extract<SessionEvent, { kind: "calibrating" }>): Session {
@@ -241,6 +251,8 @@ export function reduce(session: Session, event: SessionEvent): Session {
       return onStartRequested(session, event);
     case "sink-choice-needed":
       return onSinkChoiceNeeded(session, event);
+    case "sink-chosen":
+      return onSinkChosen(session, event);
     case "host-opened":
       return onHostOpened(session, event);
     case "host-failed":

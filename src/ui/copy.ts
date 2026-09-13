@@ -1,5 +1,4 @@
-import type { Obstacle, Session } from "../session/state";
-import type { AudioRoute } from "../audio/sinks";
+import type { AudioRoute, Obstacle, Session } from "../session/state";
 
 export type SessionCopy = {
   readonly title: string;
@@ -48,6 +47,7 @@ export const COPY: { readonly [K in Session["kind"]]: SessionCopy } = {
 };
 
 const RETRY = "もう一度試す";
+const BACK = "戻る";
 
 const STATIC_OBSTACLE: {
   readonly [K in Exclude<Obstacle["kind"], "engine-failed" | "sink-failed">]: SessionCopy;
@@ -56,40 +56,62 @@ const STATIC_OBSTACLE: {
     title: "マイクを使えません",
     body: "Safari では「設定 → ウェブサイト → マイク」から、Chrome ではアドレスバー左のサイト設定から、このサイトのマイクを許可してください。",
     primary: RETRY,
+    secondary: BACK,
   },
   "no-input-device": {
     title: "マイクが見つかりません",
     body: "マイクを接続するか、macOS の「システム設定 → サウンド → 入力」で入力装置を選んでください。",
     primary: RETRY,
+    secondary: BACK,
   },
   "device-in-use": {
     title: "マイクを独占しているアプリがあります",
     body: "ほかのアプリがマイクを使っていると開始できません。そのアプリを終了してからやり直してください。",
     primary: RETRY,
+    secondary: BACK,
   },
   "context-blocked": {
     title: "音声コンテキストを開始できませんでした",
     body: "ページを再読み込みしてから、もう一度ボタンを押してください。",
     primary: RETRY,
+    secondary: BACK,
   },
   "no-loopback": {
     title: "仮想マイクが見つかりません",
     body: "BlackHole（https://existential.audio/blackhole/）をインストールし、Chrome を再起動してからもう一度試してください。会議の出力先に Multi-Output Device は使わないでください。",
     primary: RETRY,
+    secondary: BACK,
+  },
+  "loopback-input": {
+    title: "実マイクが見つかりません",
+    body: "システムの入力が仮想デバイスになっています。macOS の「システム設定 → サウンド → 入力」で、ヘッドホンや内蔵マイクなど実マイクを選んでからもう一度試してください。",
+    primary: RETRY,
+    secondary: BACK,
   },
   "sink-unsupported": {
     title: "このブラウザでは会議マイクにできません",
-    body: "会議マイクには macOS の最新 Chrome が必要です。Safari では出力先を切り替えられません。",
+    body: "会議マイクには macOS の最新 Chrome が必要です。Safari では出力先を切り替えられません。ヒアスルーならこのまま使えます。",
     primary: RETRY,
+    secondary: BACK,
   },
 };
 
 export function obstacleCopy(obstacle: Obstacle): SessionCopy {
   if (obstacle.kind === "engine-failed") {
-    return { title: "音声処理を開始できませんでした", body: obstacle.detail, primary: RETRY };
+    return {
+      title: "音声処理を開始できませんでした",
+      body: obstacle.detail,
+      primary: RETRY,
+      secondary: BACK,
+    };
   }
   if (obstacle.kind === "sink-failed") {
-    return { title: "仮想マイクへ出力できませんでした", body: obstacle.detail, primary: RETRY };
+    return {
+      title: "仮想マイクへ出力できませんでした",
+      body: obstacle.detail,
+      primary: RETRY,
+      secondary: BACK,
+    };
   }
   return STATIC_OBSTACLE[obstacle.kind];
 }
@@ -103,6 +125,13 @@ export function liveSessionCopy(route: AudioRoute): SessionCopy {
     };
   }
   return COPY.active;
+}
+
+export function howlHint(route: AudioRoute): string | null {
+  if (route.kind === "meeting") {
+    return "スピーカーに音が出ていると、仮想マイクへ回り込むことがあります。会議アプリのスピーカーはヘッドホンにしてください。";
+  }
+  return null;
 }
 
 export function latencyCopy(latencyMs: number): string {

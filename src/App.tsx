@@ -3,7 +3,7 @@ import { Headphones, Mic, Pause, ShieldAlert } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Slider } from "@/components/ui/slider";
-import { COPY, latencyCopy, liveSessionCopy, missingLabel, obstacleCopy } from "@/ui/copy";
+import { COPY, howlHint, latencyCopy, liveSessionCopy, missingLabel, obstacleCopy } from "@/ui/copy";
 import { Spectrum } from "@/ui/Spectrum";
 import { useHushSession } from "@/session/useHushSession";
 import type { LoopbackSink } from "@/audio/sinks";
@@ -100,9 +100,11 @@ function ChooseSinkPanel({
 function ObstaclePanel({
   session,
   onRetry,
+  onBack,
 }: {
   session: Extract<Session, { kind: "blocked" }>;
   onRetry: () => void;
+  onBack: () => void;
 }) {
   const copy = obstacleCopy(session.obstacle);
   return (
@@ -110,6 +112,11 @@ function ObstaclePanel({
       <Button size="lg" className="h-12 min-h-11 w-full md:w-auto" onClick={onRetry}>
         {copy.primary}
       </Button>
+      {copy.secondary ? (
+        <Button variant="outline" className="min-h-11 w-full md:w-auto" onClick={onBack}>
+          {copy.secondary}
+        </Button>
+      ) : null}
     </Shell>
   );
 }
@@ -151,11 +158,11 @@ function CalibrationPanel({
 
 function HowlBanner({
   peakHz,
-  meeting,
+  hint,
   onDismiss,
 }: {
   peakHz: number;
-  meeting: boolean;
+  hint: string | null;
   onDismiss: () => void;
 }) {
   return (
@@ -167,11 +174,7 @@ function HowlBanner({
       <p className="text-sm text-muted-foreground">
         ピークは約 {Math.round(peakHz)} Hz です。ヘッドホンをつけてから再開してください。
       </p>
-      {meeting ? (
-        <p className="text-sm text-muted-foreground">
-          スピーカーに音が出ていると、仮想マイクへ回り込むことがあります。会議アプリのスピーカーはヘッドホンにしてください。
-        </p>
-      ) : null}
+      {hint ? <p className="text-sm text-muted-foreground">{hint}</p> : null}
       <Button className="min-h-11" onClick={onDismiss}>
         ヘッドホンをつけて再開
       </Button>
@@ -255,7 +258,7 @@ function ActivePanel({
       {guarded ? (
         <HowlBanner
           peakHz={session.monitor.peakHz}
-          meeting={session.route.kind === "meeting"}
+          hint={howlHint(session.route)}
           onDismiss={actions.dismissGuard}
         />
       ) : null}
@@ -290,7 +293,13 @@ function App() {
         />
       );
     case "blocked":
-      return <ObstaclePanel session={session} onRetry={() => void actions.start(session.intent)} />;
+      return (
+        <ObstaclePanel
+          session={session}
+          onRetry={() => void actions.start(session.intent)}
+          onBack={() => void actions.stop()}
+        />
+      );
     case "calibrating":
       return <CalibrationPanel session={session} onCancel={() => void actions.stop()} />;
     case "active":

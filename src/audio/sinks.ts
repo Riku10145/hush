@@ -3,21 +3,14 @@ export type LoopbackSink = {
   readonly label: string;
 };
 
-export type SinkCatalog = {
-  readonly loopbacks: readonly LoopbackSink[];
-  readonly outputs: readonly LoopbackSink[];
-};
-
 export type MeetingSinkPick =
   | { readonly kind: "none" }
   | { readonly kind: "one"; readonly sink: LoopbackSink }
   | { readonly kind: "many"; readonly sinks: readonly LoopbackSink[] };
 
-export type RouteIntent = "hear-through" | "meeting";
-
-export type AudioRoute =
-  | { readonly kind: "hear-through" }
-  | { readonly kind: "meeting"; readonly sink: LoopbackSink };
+export type CapturePick =
+  | { readonly kind: "none" }
+  | { readonly kind: "one"; readonly deviceId: string };
 
 export type DeviceListing = {
   readonly kind: string;
@@ -44,24 +37,25 @@ export function isLoopbackLabel(label: string): boolean {
   return /(?:^|[\s(])loopback(?:[\s)]|$)/.test(name) || name.includes("loopback audio");
 }
 
-export function catalogSinks(devices: readonly DeviceListing[]): SinkCatalog {
-  const outputs: LoopbackSink[] = [];
+function labeledDevice(device: DeviceListing): LoopbackSink {
+  return { deviceId: device.deviceId, label: device.label.trim() || device.deviceId };
+}
+
+export function catalogLoopbacks(devices: readonly DeviceListing[]): readonly LoopbackSink[] {
   const loopbacks: LoopbackSink[] = [];
   for (const device of devices) {
     if (device.kind !== "audiooutput" || device.deviceId.length === 0) {
       continue;
     }
-    const sink = { deviceId: device.deviceId, label: device.label.trim() || device.deviceId };
-    outputs.push(sink);
+    const sink = labeledDevice(device);
     if (isLoopbackLabel(sink.label)) {
       loopbacks.push(sink);
     }
   }
-  return { loopbacks, outputs };
+  return loopbacks;
 }
 
-export function pickMeetingSink(catalog: SinkCatalog): MeetingSinkPick {
-  const { loopbacks } = catalog;
+export function pickMeetingSink(loopbacks: readonly LoopbackSink[]): MeetingSinkPick {
   if (loopbacks.length === 0) {
     return { kind: "none" };
   }
@@ -73,4 +67,17 @@ export function pickMeetingSink(catalog: SinkCatalog): MeetingSinkPick {
     return { kind: "one", sink: preferred };
   }
   return { kind: "many", sinks: loopbacks };
+}
+
+export function pickCaptureDevice(devices: readonly DeviceListing[]): CapturePick {
+  for (const device of devices) {
+    if (device.kind !== "audioinput" || device.deviceId.length === 0) {
+      continue;
+    }
+    if (isLoopbackLabel(device.label)) {
+      continue;
+    }
+    return { kind: "one", deviceId: device.deviceId };
+  }
+  return { kind: "none" };
 }

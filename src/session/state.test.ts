@@ -80,6 +80,8 @@ describe("reduce", () => {
     let session = reduce(IDLE, { kind: "start-requested", epoch: e, intent: "meeting" });
     session = reduce(session, { kind: "sink-choice-needed", epoch: e, sinks });
     expect(session).toEqual({ kind: "choosing-sink", epoch: e, sinks });
+    session = reduce(session, { kind: "sink-chosen", epoch: e });
+    expect(session).toEqual({ kind: "requesting", epoch: e, intent: "meeting" });
     session = reduce(session, {
       kind: "host-opened",
       epoch: e,
@@ -137,6 +139,33 @@ describe("reduce", () => {
       replacing: true,
       latencyMs: 20,
       route: MEETING_ROUTE,
+    });
+  });
+
+  it("keeps idle when host-failed arrives after stop", () => {
+    const e = epoch(1);
+    const idle = reduce(IDLE, {
+      kind: "host-failed",
+      epoch: e,
+      obstacle: { kind: "sink-failed", detail: "gone" },
+      intent: "meeting",
+    });
+    expect(idle).toEqual(IDLE);
+  });
+
+  it("stores host-failed intent from the event", () => {
+    const e = epoch(1);
+    let session = reduce(IDLE, { kind: "start-requested", epoch: e, intent: "meeting" });
+    session = reduce(session, {
+      kind: "host-failed",
+      epoch: e,
+      obstacle: { kind: "no-loopback" },
+      intent: "meeting",
+    });
+    expect(session).toEqual({
+      kind: "blocked",
+      obstacle: { kind: "no-loopback" },
+      intent: "meeting",
     });
   });
 });

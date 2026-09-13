@@ -63,7 +63,7 @@ export interface Suppressor {
 }
 
 const EPS = 1e-12;
-const GAIN_SMOOTH = 0.72;
+const GAIN_SMOOTH = 0.85;
 const BYPASS_SLEW = 0.12;
 const HOWL_FRAMES = 14;
 const HOWL_RATIO = 6;

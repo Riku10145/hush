@@ -131,6 +131,8 @@ type Engine = {
   monitorOpen: boolean;
   howlCount: number;
   lastReport: FrameReport;
+  hopRmsEma: number;
+  onsetHold: number;
 };
 
 function allocate(config: EngineConfig): Engine {
@@ -166,6 +168,8 @@ function allocate(config: EngineConfig): Engine {
     monitorOpen: false,
     howlCount: 0,
     lastReport: { kind: "calibrating", framesSeeded: 0, framesNeeded, inputLevel: 0 },
+    hopRmsEma: 0,
+    onsetHold: 0,
   };
 }
 
@@ -181,6 +185,14 @@ function analyzeHop(engine: Engine) {
   }
   fillBands(engine.config.sampleRate, engine.mag, engine.lastInputBands);
   engine.bypassMix += ((engine.wantBypass ? 1 : 0) - engine.bypassMix) * BYPASS_SLEW;
+  const hopRms = rms(engine.hopIn);
+  const floor = Math.max(engine.hopRmsEma, 1e-4);
+  if (engine.phase === "suppressing" && hopRms > floor * 2.4 && hopRms > 0.02) {
+    engine.onsetHold = 5;
+  } else if (engine.onsetHold > 0) {
+    engine.onsetHold -= 1;
+  }
+  engine.hopRmsEma = engine.hopRmsEma * 0.96 + hopRms * 0.04;
 }
 
 function seedNoise(engine: Engine, inputLevel: number): FrameReport {
@@ -209,8 +221,9 @@ function applyGains(engine: Engine): number {
     const noisy = engine.mag[bin];
     const subtracted = (noisy - oversub * engine.noise[bin]) / Math.max(noisy, EPS);
     const suppressed = Math.min(1, Math.max(floor, subtracted));
-    const instant = suppressed * wet + (1 - wet);
-    const smoothed = GAIN_SMOOTH * engine.prevGain[bin] + (1 - GAIN_SMOOTH) * instant;
+    const instant = engine.onsetHold > 0 ? 1 : suppressed * wet + (1 - wet);
+    const smoothed =
+      engine.onsetHold > 0 ? 1 : GAIN_SMOOTH * engine.prevGain[bin] + (1 - GAIN_SMOOTH) * instant;
     engine.prevGain[bin] = smoothed;
     gainAcc += smoothed;
     engine.re[bin] *= smoothed;
@@ -330,6 +343,8 @@ function resetCalibration(engine: Engine) {
     framesNeeded: engine.framesNeeded,
     inputLevel: 0,
   };
+  engine.hopRmsEma = 0;
+  engine.onsetHold = 0;
 }
 
 export function createSuppressor(config: EngineConfig): Suppressor {

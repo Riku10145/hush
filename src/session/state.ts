@@ -1,4 +1,12 @@
+import type { LoopbackSink } from "../audio/sinks";
+
 export type SessionEpoch = number & { readonly __brand: "SessionEpoch" };
+
+export type RouteIntent = "hear-through" | "meeting";
+
+export type AudioRoute =
+  | { readonly kind: "hear-through" }
+  | { readonly kind: "meeting"; readonly sink: LoopbackSink };
 
 export function epoch(value: number): SessionEpoch {
   return value as SessionEpoch;
@@ -9,7 +17,11 @@ export type Obstacle =
   | { readonly kind: "no-input-device" }
   | { readonly kind: "device-in-use" }
   | { readonly kind: "context-blocked" }
-  | { readonly kind: "engine-failed"; readonly detail: string };
+  | { readonly kind: "engine-failed"; readonly detail: string }
+  | { readonly kind: "no-loopback" }
+  | { readonly kind: "loopback-input" }
+  | { readonly kind: "sink-unsupported" }
+  | { readonly kind: "sink-failed"; readonly detail: string };
 
 export type Capability = "audio-context" | "audio-worklet" | "get-user-media";
 
@@ -39,8 +51,9 @@ export const SILENT_METERS: MeterSnapshot = {
 export type Session =
   | { readonly kind: "unsupported"; readonly missing: readonly [Capability, ...Capability[]] }
   | { readonly kind: "idle" }
-  | { readonly kind: "requesting"; readonly epoch: SessionEpoch }
-  | { readonly kind: "blocked"; readonly obstacle: Obstacle }
+  | { readonly kind: "requesting"; readonly epoch: SessionEpoch; readonly intent: RouteIntent }
+  | { readonly kind: "choosing-sink"; readonly epoch: SessionEpoch; readonly sinks: readonly LoopbackSink[] }
+  | { readonly kind: "blocked"; readonly obstacle: Obstacle; readonly intent: RouteIntent }
   | {
       readonly kind: "calibrating";
       readonly epoch: SessionEpoch;
@@ -49,6 +62,7 @@ export type Session =
       readonly meters: MeterSnapshot;
       readonly replacing: boolean;
       readonly latencyMs: number;
+      readonly route: AudioRoute;
     }
   | {
       readonly kind: "active";
@@ -57,13 +71,25 @@ export type Session =
       readonly monitor: MonitorState;
       readonly meters: MeterSnapshot;
       readonly latencyMs: number;
+      readonly route: AudioRoute;
     };
 
 export type SessionEvent =
   | { readonly kind: "unsupported"; readonly missing: readonly [Capability, ...Capability[]] }
-  | { readonly kind: "start-requested"; readonly epoch: SessionEpoch }
-  | { readonly kind: "host-opened"; readonly epoch: SessionEpoch; readonly latencyMs: number }
-  | { readonly kind: "host-failed"; readonly epoch: SessionEpoch; readonly obstacle: Obstacle }
+  | { readonly kind: "start-requested"; readonly epoch: SessionEpoch; readonly intent: RouteIntent }
+  | {
+      readonly kind: "sink-choice-needed";
+      readonly epoch: SessionEpoch;
+      readonly sinks: readonly LoopbackSink[];
+    }
+  | { readonly kind: "sink-chosen"; readonly epoch: SessionEpoch }
+  | { readonly kind: "host-opened"; readonly epoch: SessionEpoch; readonly latencyMs: number; readonly route: AudioRoute }
+  | {
+      readonly kind: "host-failed";
+      readonly epoch: SessionEpoch;
+      readonly obstacle: Obstacle;
+      readonly intent: RouteIntent;
+    }
   | { readonly kind: "calibrating"; readonly epoch: SessionEpoch; readonly progress: number; readonly meters: MeterSnapshot }
   | { readonly kind: "calibrated"; readonly epoch: SessionEpoch; readonly meters: MeterSnapshot }
   | { readonly kind: "metered"; readonly epoch: SessionEpoch; readonly meters: MeterSnapshot }
@@ -79,6 +105,7 @@ export const IDLE: Session = { kind: "idle" };
 function sameEpoch(session: Session, next: SessionEpoch): boolean {
   return (
     (session.kind === "requesting" ||
+      session.kind === "choosing-sink" ||
       session.kind === "calibrating" ||
       session.kind === "active") &&
     session.epoch === next
@@ -86,10 +113,32 @@ function sameEpoch(session: Session, next: SessionEpoch): boolean {
 }
 
 function onStartRequested(session: Session, event: Extract<SessionEvent, { kind: "start-requested" }>): Session {
-  if (session.kind === "requesting" || session.kind === "calibrating" || session.kind === "active") {
+  if (
+    session.kind === "requesting" ||
+    session.kind === "choosing-sink" ||
+    session.kind === "calibrating" ||
+    session.kind === "active"
+  ) {
     return session;
   }
-  return { kind: "requesting", epoch: event.epoch };
+  return { kind: "requesting", epoch: event.epoch, intent: event.intent };
+}
+
+function onSinkChoiceNeeded(
+  session: Session,
+  event: Extract<SessionEvent, { kind: "sink-choice-needed" }>,
+): Session {
+  if (session.kind !== "requesting" || session.epoch !== event.epoch) {
+    return session;
+  }
+  return { kind: "choosing-sink", epoch: event.epoch, sinks: event.sinks };
+}
+
+function onSinkChosen(session: Session, event: Extract<SessionEvent, { kind: "sink-chosen" }>): Session {
+  if (session.kind !== "choosing-sink" || session.epoch !== event.epoch) {
+    return session;
+  }
+  return { kind: "requesting", epoch: event.epoch, intent: "meeting" };
 }
 
 function onHostOpened(session: Session, event: Extract<SessionEvent, { kind: "host-opened" }>): Session {
@@ -104,14 +153,21 @@ function onHostOpened(session: Session, event: Extract<SessionEvent, { kind: "ho
     meters: SILENT_METERS,
     replacing: session.kind === "active",
     latencyMs: event.latencyMs,
+    route: event.route,
   };
 }
 
 function onHostFailed(session: Session, event: Extract<SessionEvent, { kind: "host-failed" }>): Session {
-  if (session.kind === "requesting" && session.epoch !== event.epoch) {
+  if (session.kind === "idle" || session.kind === "unsupported") {
     return session;
   }
-  return { kind: "blocked", obstacle: event.obstacle };
+  if (
+    (session.kind === "requesting" || session.kind === "choosing-sink") &&
+    session.epoch !== event.epoch
+  ) {
+    return session;
+  }
+  return { kind: "blocked", obstacle: event.obstacle, intent: event.intent };
 }
 
 function onCalibrating(session: Session, event: Extract<SessionEvent, { kind: "calibrating" }>): Session {
@@ -132,6 +188,7 @@ function onCalibrated(session: Session, event: Extract<SessionEvent, { kind: "ca
     monitor: { kind: "open", bypassHeld: false },
     meters: event.meters,
     latencyMs: session.latencyMs,
+    route: session.route,
   };
 }
 
@@ -175,6 +232,7 @@ function onRecalibrate(session: Session, event: Extract<SessionEvent, { kind: "r
     meters: SILENT_METERS,
     replacing: true,
     latencyMs: session.latencyMs,
+    route: session.route,
   };
 }
 
@@ -191,6 +249,10 @@ export function reduce(session: Session, event: SessionEvent): Session {
       return { kind: "unsupported", missing: event.missing };
     case "start-requested":
       return onStartRequested(session, event);
+    case "sink-choice-needed":
+      return onSinkChoiceNeeded(session, event);
+    case "sink-chosen":
+      return onSinkChosen(session, event);
     case "host-opened":
       return onHostOpened(session, event);
     case "host-failed":

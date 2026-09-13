@@ -1,12 +1,28 @@
 import { strength as clampStrength } from "../dsp/suppressor";
-import { classify, missingCapabilities, openAudioHost, type AudioHost } from "../audio/host";
+import {
+  canSetSinkId,
+  classify,
+  missingCapabilities,
+  openAudioHost,
+  probeDeviceList,
+  type AudioHost,
+} from "../audio/host";
 import type { EngineReport } from "../audio/protocol";
+import {
+  catalogLoopbacks,
+  pickCaptureDevice,
+  pickMeetingSink,
+  type LoopbackSink,
+} from "../audio/sinks";
 import {
   epoch,
   IDLE,
   reduce,
+  type AudioRoute,
   type MeterSnapshot,
+  type RouteIntent,
   type Session,
+  type SessionEpoch,
 } from "./state";
 
 function toMeters(report: Extract<EngineReport, { meters: unknown }>): MeterSnapshot {
@@ -21,7 +37,8 @@ function toMeters(report: Extract<EngineReport, { meters: unknown }>): MeterSnap
 }
 
 export type HushActions = {
-  start: () => Promise<void>;
+  start: (intent: RouteIntent) => Promise<void>;
+  chooseSink: (sink: LoopbackSink) => Promise<void>;
   stop: () => Promise<void>;
   recalibrate: () => void;
   setStrength: (value: number) => void;
@@ -33,6 +50,7 @@ type Runtime = {
   session: Session;
   currentEpoch: number;
   host: AudioHost | null;
+  captureDeviceId: string | null;
   starting: boolean;
   onChange: (session: Session) => void;
 };
@@ -44,6 +62,10 @@ function publish(runtime: Runtime, next: Session) {
 
 function dispatch(runtime: Runtime, event: Parameters<typeof reduce>[1]) {
   publish(runtime, reduce(runtime.session, event));
+}
+
+function isCurrent(runtime: Runtime, token: SessionEpoch): boolean {
+  return runtime.currentEpoch === token;
 }
 
 function handleReport(runtime: Runtime, report: EngineReport) {
@@ -70,22 +92,119 @@ function handleReport(runtime: Runtime, report: EngineReport) {
   runtime.host?.send({ kind: "set-monitor", open: false });
 }
 
-async function stop(runtime: Runtime) {
+async function abandonHost(runtime: Runtime) {
   const current = runtime.host;
   runtime.host = null;
+  runtime.captureDeviceId = null;
   if (current) {
     await current.close();
   }
+}
+
+async function stop(runtime: Runtime) {
+  runtime.currentEpoch += 1;
+  runtime.starting = false;
+  await abandonHost(runtime);
   dispatch(runtime, { kind: "stopped" });
 }
 
-async function start(runtime: Runtime) {
-  const busy =
+async function connectAndCalibrate(
+  runtime: Runtime,
+  token: SessionEpoch,
+  route: AudioRoute,
+  inputDeviceId: string | undefined,
+) {
+  const host = await openAudioHost({
+    sinkId: route.kind === "meeting" ? route.sink.deviceId : undefined,
+    inputDeviceId,
+    onReport: (report) => handleReport(runtime, report),
+    onLost: () => {
+      if (!isCurrent(runtime, token)) {
+        return;
+      }
+      void stop(runtime);
+    },
+  });
+  if (!isCurrent(runtime, token)) {
+    await host.close();
+    return;
+  }
+  runtime.host = host;
+  dispatch(runtime, {
+    kind: "host-opened",
+    epoch: token,
+    latencyMs: host.latencyMs,
+    route,
+  });
+  if (!isCurrent(runtime, token) || !runtime.host) {
+    return;
+  }
+  runtime.host.send({ kind: "calibrate", epoch: runtime.currentEpoch });
+  runtime.host.send({ kind: "set-strength", value: 0.6 });
+}
+
+function isBusy(runtime: Runtime): boolean {
+  return (
     runtime.starting ||
     runtime.session.kind === "calibrating" ||
     runtime.session.kind === "active" ||
-    runtime.session.kind === "requesting";
-  if (busy) {
+    runtime.session.kind === "requesting" ||
+    runtime.session.kind === "choosing-sink"
+  );
+}
+
+function failHost(runtime: Runtime, token: SessionEpoch, intent: RouteIntent, error: unknown) {
+  if (!isCurrent(runtime, token)) {
+    return;
+  }
+  dispatch(runtime, { kind: "host-failed", epoch: token, obstacle: classify(error), intent });
+}
+
+async function startMeeting(runtime: Runtime, token: SessionEpoch) {
+  if (!canSetSinkId()) {
+    dispatch(runtime, {
+      kind: "host-failed",
+      epoch: token,
+      obstacle: { kind: "sink-unsupported" },
+      intent: "meeting",
+    });
+    return;
+  }
+  const devices = await probeDeviceList();
+  if (!isCurrent(runtime, token)) {
+    return;
+  }
+  const capture = pickCaptureDevice(devices);
+  if (capture.kind === "none") {
+    dispatch(runtime, {
+      kind: "host-failed",
+      epoch: token,
+      obstacle: { kind: "loopback-input" },
+      intent: "meeting",
+    });
+    return;
+  }
+  runtime.captureDeviceId = capture.deviceId;
+  const pick = pickMeetingSink(catalogLoopbacks(devices));
+  if (pick.kind === "none") {
+    runtime.captureDeviceId = null;
+    dispatch(runtime, {
+      kind: "host-failed",
+      epoch: token,
+      obstacle: { kind: "no-loopback" },
+      intent: "meeting",
+    });
+    return;
+  }
+  if (pick.kind === "one") {
+    await connectAndCalibrate(runtime, token, { kind: "meeting", sink: pick.sink }, capture.deviceId);
+    return;
+  }
+  dispatch(runtime, { kind: "sink-choice-needed", epoch: token, sinks: pick.sinks });
+}
+
+async function start(runtime: Runtime, intent: RouteIntent) {
+  if (isBusy(runtime)) {
     return;
   }
   const missing = missingCapabilities();
@@ -97,23 +216,49 @@ async function start(runtime: Runtime) {
   runtime.starting = true;
   runtime.currentEpoch += 1;
   const token = epoch(runtime.currentEpoch);
-  dispatch(runtime, { kind: "start-requested", epoch: token });
+  dispatch(runtime, { kind: "start-requested", epoch: token, intent });
   try {
-    runtime.host = await openAudioHost({
-      onReport: (report) => handleReport(runtime, report),
-      onLost: (obstacle) => {
-        void stop(runtime);
-        dispatch(runtime, { kind: "host-failed", epoch: token, obstacle });
-      },
-    });
-    dispatch(runtime, { kind: "host-opened", epoch: token, latencyMs: runtime.host.latencyMs });
-    runtime.host.send({ kind: "calibrate", epoch: runtime.currentEpoch });
-    runtime.host.send({ kind: "set-strength", value: 0.6 });
+    if (intent === "hear-through") {
+      await connectAndCalibrate(runtime, token, { kind: "hear-through" }, undefined);
+      return;
+    }
+    await startMeeting(runtime, token);
   } catch (error) {
-    dispatch(runtime, { kind: "host-failed", epoch: token, obstacle: classify(error) });
-    runtime.host = null;
+    await abandonHost(runtime);
+    failHost(runtime, token, intent, error);
   } finally {
-    runtime.starting = false;
+    if (isCurrent(runtime, token)) {
+      runtime.starting = false;
+    }
+  }
+}
+
+async function chooseSink(runtime: Runtime, sink: LoopbackSink) {
+  if (runtime.starting || runtime.session.kind !== "choosing-sink") {
+    return;
+  }
+  const token = runtime.session.epoch;
+  const inputDeviceId = runtime.captureDeviceId;
+  if (!inputDeviceId) {
+    dispatch(runtime, {
+      kind: "host-failed",
+      epoch: token,
+      obstacle: { kind: "loopback-input" },
+      intent: "meeting",
+    });
+    return;
+  }
+  runtime.starting = true;
+  dispatch(runtime, { kind: "sink-chosen", epoch: token });
+  try {
+    await connectAndCalibrate(runtime, token, { kind: "meeting", sink }, inputDeviceId);
+  } catch (error) {
+    await abandonHost(runtime);
+    failHost(runtime, token, "meeting", error);
+  } finally {
+    if (isCurrent(runtime, token)) {
+      runtime.starting = false;
+    }
   }
 }
 
@@ -135,6 +280,7 @@ export function createHushSession(onChange: (session: Session) => void): HushAct
     session: IDLE,
     currentEpoch: 0,
     host: null,
+    captureDeviceId: null,
     starting: false,
     onChange,
   };
@@ -142,7 +288,8 @@ export function createHushSession(onChange: (session: Session) => void): HushAct
     getSession() {
       return runtime.session;
     },
-    start: () => start(runtime),
+    start: (intent) => start(runtime, intent),
+    chooseSink: (sink) => chooseSink(runtime, sink),
     stop: () => stop(runtime),
     recalibrate: () => recalibrate(runtime),
     setStrength(value) {

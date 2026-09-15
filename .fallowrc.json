@@ -4,6 +4,7 @@
     "src/main.tsx",
     "src/audio/processor.ts",
     "vite.config.ts",
-    "scripts/check-licenses.mjs"
+    "scripts/check-licenses.mjs",
+    "scripts/print-accuracy.ts"
   ]
 }

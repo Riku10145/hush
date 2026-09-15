@@ -9,6 +9,8 @@
     "lint": "oxlint",
     "preview": "vite preview --host 127.0.0.1 --port 43147",
     "test": "vitest run",
+    "accuracy": "vitest run src/dsp/accuracy.test.ts",
+    "accuracy:report": "npx vite-node scripts/print-accuracy.ts",
     "check:licenses": "node scripts/check-licenses.mjs"
   },
   "dependencies": {

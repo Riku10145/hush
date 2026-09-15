@@ -9,6 +9,7 @@ import {
 } from "./suppressor";
 
 const RATE = 48_000;
+const RECONSTRUCT_SKIP = RATE * 0.1;
 
 function run(engine: ReturnType<typeof createSuppressor>, input: Float32Array): Float32Array {
   const output = new Float32Array(input.length);
@@ -36,7 +37,7 @@ describe("suppressor", () => {
     const delay = FFT_SIZE - HOP_SIZE;
     let err = 0;
     let count = 0;
-    for (let i = delay + 4800; i < input.length - 128; i++) {
+    for (let i = delay + RECONSTRUCT_SKIP; i < input.length - HOP_SIZE; i++) {
       const d = output[i] - input[i - delay];
       err += d * d;
       count += 1;
